@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testConfig>
+    <!--
+      Automated test configuration for cross-cloud SCF performance measurement.
+      Edit this file to control which tests run with what parameters.
+
+      test type: audit | fib | s3 | azure
+      enabled:  true | false
+    -->
+
+    <!-- Audit test: native cloud storage + integrity auditing -->
+    <test type="audit" enabled="true">
+        <csvFile>云审计各自.csv</csvFile>
+        <platforms>Tencent,Ali,AWS</platforms>
+        <memorySizes>128,256,512,1024,2048</memorySizes>
+        <threadCounts>1,2,4,8,16</threadCounts>
+        <repetitions>30</repetitions>
+    </test>
+
+    <!-- Fibonacci test: pure CPU benchmark (no download) -->
+    <test type="fib" enabled="true">
+        <csvFile>FIV.csv</csvFile>
+        <platforms>Tencent,Ali,AWS</platforms>
+        <memorySizes>128,256,512,1024,2048</memorySizes>
+        <fibN>800000</fibN>
+        <repetitions>30</repetitions>
+    </test>
+
+    <!-- S3 unified storage test: all platforms download from same S3 bucket -->
+    <test type="s3" enabled="true">
+        <csvFile>s3.csv</csvFile>
+        <platforms>Tencent,Ali,AWS</platforms>
+        <memorySizes>256,512,1024,2048</memorySizes>
+        <repetitions>30</repetitions>
+        <s3Bucket>scftestbucket-aws</s3Bucket>
+        <s3Region>ap-northeast-1</s3Region>
+    </test>
+
+    <!-- Azure-specific benchmark (separate format) -->
+    <test type="azure" enabled="true">
+        <csvFile>azure_benchmark_data.csv</csvFile>
+        <threadCounts>1,2,4,8,16,32</threadCounts>
+        <repetitions>10</repetitions>
+    </test>
+</testConfig>

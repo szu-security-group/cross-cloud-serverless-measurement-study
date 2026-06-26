@@ -1,0 +1,16 @@
+mavenExecutable=mvn
+filePath=D:/testdata/testfile.txt
+tmpFilePath=D:/tmp
+memorySize=512
+timeout=900
+blockNum=4
+partNum=4
+
+# === Tencent Cloud Config (Tokyo) ===
+secretId=<your-secret-id>
+secretKey=<your-secret-key>
+regionName=ap-tokyo
+bucketName=tpds-in-scf-test-tokyo-<APPID>
+functionName=audit-test-tokyo
+handler=com.fchen_group.TPDSInScf.Run.TenHandle::mainHandler
+runtime=Java8

@@ -1,0 +1,18 @@
+mavenExecutable=mvn
+filePath=D:/testdata/testfile.txt
+tmpFilePath=D:/tmp
+memorySize=512
+timeout=900
+blockNum=4
+partNum=4
+
+# === AWS Lambda Config (Tokyo) ===
+secretId=<your-secret-id>
+secretKey=<your-secret-key>
+regionName=ap-northeast-1
+bucketName=scftestbucket-aws
+functionName=audit-test-aws
+handler=com.fchen_group.TPDSInScf.Run.AwsHandle::handleRequest
+runtime=java11
+awsAccountId=<your-aws-account-id>
+roleName=scf-audit-lambda-role

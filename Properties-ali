@@ -1,0 +1,17 @@
+mavenExecutable=mvn
+filePath=D:/testdata/testfile.txt
+tmpFilePath=D:/tmp
+memorySize=512
+timeout=900
+blockNum=4
+partNum=4
+
+# === Alibaba Cloud Config (Tokyo) ===
+secretId=<your-secret-id>
+secretKey=<your-secret-key>
+regionName=ap-northeast-1
+bucketName=scftestbucket
+functionName=audit-test-ali-tokyo
+aliAccountId=<your-ali-account-id>
+handler=com.fchen_group.TPDSInScf.Run.AliHandle::handleRequest
+runtime=custom.debian10

@@ -1,0 +1,17 @@
+mavenExecutable=mvn
+filePath=D:/testdata/testfile.txt
+tmpFilePath=D:/tmp
+memorySize=512
+timeout=900
+blockNum=4
+partNum=4
+
+# === Azure Functions Config (Japan West) ===
+secretId=<your-azure-connection-string>
+secretKey=placeholder
+regionName=japanwest
+bucketName=scf-audit-container
+functionName=audit-test-azure
+functionUrl=<your-function-app-name>.japanwest-01.azurewebsites.net
+handler=Audit
+runtime=Java11
