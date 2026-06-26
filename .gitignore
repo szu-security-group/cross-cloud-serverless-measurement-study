@@ -15,9 +15,9 @@ Thumbs.db
 # Compiled classes
 *.class
 
-# JARs (except in target/)
+# JARs
 *.jar
-!src/**/*.jar
+!benchmark.jar
 
 # Logs
 *.log
