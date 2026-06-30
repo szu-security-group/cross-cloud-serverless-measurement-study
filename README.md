@@ -1,199 +1,197 @@
-# 基于无服务器计算的云存储审计系统 II
+This repository contains the code for measurement research of mainstream SCF services using a case study approach.
 
-云存储作为现代基础设施极大简化了应用系统的开发，但也带来了数据安全挑战。现有云存储审计方案虽在理论上取得进展，但实际应用中仍面临成本高、效率低的问题。
+The rapid development of Serverless computing function (SCF) has enabled an event-driven application development paradigm, providing users with on-demand and cost-efficient computing resources. The evolution of cloud services from Platform as a Service (PaaS) to Function as a Service (FaaS) offers a finer-grained model for resource provisioning and usage. Although SCF services offered by major CSP are functionally similar, they differ in interface design and usage patterns, and the lack of a unified management layer across CSP significantly increases the cost of comparison. To effectively understand these differences, users require a measurement framework that enables rapid evaluation of application-relevant characteristics across different CSP.
 
-本项目提出基于无服务器云函数（SCF）的云存储审计系统，通过以下三个方面提升实用性：
-1. **并行数据传输**：基于多TCP连接的并行数据块传输，提升运行效率
-2. **成本优化**：最大化利用云资源的同时降低SCF执行时间
-3. **自动化部署**：简化云服务部署流程，提升易用性
+We focus on practical performance characteristics, including stability, cold-start behavior, parallel performance, and network performance, and further evaluates the effectiveness of combining SCF with another fundamental cloud service.
 
-实验表明，本系统在大规模数据审计任务中表现优异：审计时间降至现有方案的10%，审计成本仅为原来的5%。
+---
 
-SCF 作为对象存储的接口，涉及三个关键组件：用户、存储服务和计算服务。审计流程如下：
+## Project Structure
+
+```
+src/main/java/com/fchen_group/TPDSInScf/
+├── Core/                          # auditing core algorithms
+│   ├── IntegrityAuditing.java     # 5-step protocol: KeyGen→OutSource→Audit→Prove→Verify
+│   ├── ChallengeData.java         # challenge data structure
+│   ├── ProofData.java             # proof data structure
+│   └── PseudoRandom.java          # pseudorandom number
+│
+├── Utils/                         # cloud platform abstraction layer
+│   ├── CloudAPI.java              # Tencent Cloud COS API
+│   ├── AliCloudAPI.java           # Alibaba Cloud OSS API
+│   ├── TenYunControl.java         # Tencent Cloud SCF control (deployment/invocation/configuration)
+│   ├── AliYunControl.java         # Alibaba Cloud FC control
+│   ├── AwsControl.java            # AWS Lambda control
+│   ├── AzureControl.java          # Azure Functions control
+│   ├── TenRequestClass.java       # request/response data model
+│   ├── ResponseClass.java         # response encapsulation
+│   ├── XmlConfigParser.java       # XML test configuration parser [new]
+│   └── ReedSolomon/               # RS erasure coding GF(2⁸)
+│
+├── Run/                           # entry points and cloud function handlers
+│   ├── Benchmark.java             # ★ automated test main framework [new]
+│   ├── TenHandle.java             # Tencent Cloud SCF handler
+│   ├── AliHandle.java             # Alibaba Cloud FC handler
+│   ├── AwsHandle.java             # AWS Lambda handler
+│   ├── AzureHandle.java           # Azure Functions handler
+│   ├── Client.java                # manual test entry
+│   ├── AliClient.java
+│   ├── AwsClient.java
+│   └── AzureClient.java
+│
+├── Properties                     # currently active platform configuration
+├── Properties-tencent             # Tencent Cloud configuration
+├── Properties-ali                 # Alibaba Cloud configuration
+├── Properties-aws                 # AWS configuration
+├── Properties-azure               # Azure configuration
+└── test-config.xml                # XML test parameter configuration [new]
+```
+
+## Case Study: Cloud Storage Auditing System
+
+Cloud storage greatly simplifies application system development as modern infrastructure, but it also introduces data security challenges. Cloud storage auditing is a mechanism that allows users to verify the integrity and availability of their data stored in cloud environments. In a typical cloud storage auditing system, users can periodically or on-demand request proof from the cloud service provider to confirm that their data remain intact and unaltered. In this case study, SCF acts as the interface for object storage and involves three key components: user, storage service, and compute service. The auditing workflow is as follows:
 
 <div align="center">
     <img src="mdPics/System2.png" alt="System2" style="zoom:50%;" />
 </div>
 
----
 
-## 项目结构
-
-```
-src/main/java/com/fchen_group/TPDSInScf/
-├── Core/                          # 审计核心算法
-│   ├── IntegrityAuditing.java     # 5步协议：KeyGen→OutSource→Audit→Prove→Verify
-│   ├── ChallengeData.java         # 挑战数据结构
-│   ├── ProofData.java             # 证明数据结构
-│   └── PseudoRandom.java          # 伪随机数
-│
-├── Utils/                         # 云平台抽象层
-│   ├── CloudAPI.java              # 腾讯云COS API
-│   ├── AliCloudAPI.java           # 阿里云OSS API
-│   ├── TenYunControl.java         # 腾讯云SCF控制（部署/调用/配置）
-│   ├── AliYunControl.java         # 阿里云FC控制
-│   ├── AwsControl.java            # AWS Lambda控制
-│   ├── AzureControl.java          # Azure Functions控制
-│   ├── TenRequestClass.java       # 请求/响应数据模型
-│   ├── ResponseClass.java         # 响应封装
-│   ├── XmlConfigParser.java       # XML测试配置解析器 [新增]
-│   └── ReedSolomon/               # RS纠删码 GF(2⁸)
-│
-├── Run/                           # 入口与云函数处理器
-│   ├── Benchmark.java             # ★ 自动化测试主框架 [新增]
-│   ├── TenHandle.java             # 腾讯云SCF处理器
-│   ├── AliHandle.java             # 阿里云FC处理器
-│   ├── AwsHandle.java             # AWS Lambda处理器
-│   ├── AzureHandle.java           # Azure Functions处理器
-│   ├── Client.java                # 手动测试入口
-│   ├── AliClient.java
-│   ├── AwsClient.java
-│   └── AzureClient.java
-│
-├── Properties                     # 当前激活的平台配置
-├── Properties-tencent             # 腾讯云配置
-├── Properties-ali                 # 阿里云配置
-├── Properties-aws                 # AWS配置
-├── Properties-azure               # Azure配置
-└── test-config.xml                # XML测试参数配置 [新增]
-```
-
-## 审计协议（5步）
+## Auditing Protocol (5 Steps)
 
 ```
-KeyGen → OutSource → [上传到云端] → Audit(SCF调用) → Prove → Verify
+KeyGen → OutSource → [upload to cloud] → Audit(SCF invocation) → Prove → Verify
 ```
 
-| 步骤 | 执行位置 | 说明 |
-|------|---------|------|
-| KeyGen | 本地 | 生成加密密钥和认证密钥 |
-| OutSource | 本地 | 文件编码为k=223数据块+m=32校验块，生成认证标签 |
-| Upload | 本地 | 上传sourceFile.txt和parities.txt到云存储 |
-| Audit | 本地 | 生成长度l=460的随机挑战 |
-| Prove | SCF内 | 从云端下载挑战块，计算数据和校验证明 |
-| Verify | 本地 | 验证证明正确性，判断数据完整性 |
+| Step | Execution Location | Description |
+|------|--------------------|-------------|
+| KeyGen | local | generate encryption key and authentication key |
+| OutSource | local | encode file into k=223 data blocks + m=32 parity blocks, generate authentication tags |
+| Upload | local | upload sourceFile.txt and parities.txt to cloud storage |
+| Audit | local | generate random challenge of length l=460 |
+| Prove | inside SCF | download challenge blocks from cloud, compute data and parity proofs |
+| Verify | local | verify proof correctness, determine data integrity |
 
-参数：n=255, k=223, GF(2⁸), 挑战长度l=460，测试文件~7MB。
+Parameters: n=255, k=223, GF(2⁸), challenge length l=460, test file ~7MB.
 
-## 构建
+## Build
 
-本项目使用 **Java 1.8** + **Maven** 开发，支持四个云平台（腾讯云/阿里云/AWS/Azure）。
+This project uses **Java 1.8** + **Maven**, and supports four cloud platforms (Tencent Cloud / Alibaba Cloud / AWS / Azure).
 
-配置 **Properties** 文件以访问对象存储和SCF服务，并指定中间审计文件的存放位置。
+Configure the **Properties** file to access object storage and SCF services, and specify the location for intermediate auditing files.
 
 ```bash
-# 使用 development-Azure profile 一次性构建包含全部平台SDK的JAR
+# Build a JAR containing all platform SDKs using development-Azure profile
 mvn package -Pdevelopment-Azure -DskipTests
 ```
 
-构建产物：`target/TPDSInSCF-1.0-SNAPSHOT_Benchmark-jar-with-dependencies.jar`
+Build artifact: `target/TPDSInSCF-1.0-SNAPSHOT_Benchmark-jar-with-dependencies.jar`
 
-## 手动运行（单次测试）
+## Manual Run (Single Test)
 
-打包后将 **Properties** 文件放在JAR同目录，运行：
+After packaging, place the **Properties** file in the same directory as the JAR and run:
 
 ```bash
 java -cp TPDSInSCF-1.0-SNAPSHOT_Benchmark-jar-with-dependencies.jar com.fchen_group.TPDSInScf.Run.Client
 ```
 
-## 自动化测试（Benchmark）
+## Automated Testing (Benchmark)
 
-### 命令行
+### Command Line
 
 ```bash
-java -cp <JAR> com.fchen_group.TPDSInScf.Run.Benchmark [测试类型] [云平台...]
+java -cp <JAR> com.fchen_group.TPDSInScf.Run.Benchmark [test type] [cloud platforms...]
 ```
 
-### 测试类型
+### Test Types
 
-| 值 | 说明 | 输出CSV |
-|-----|------|---------|
-| `audit` | 原生云存储+完整性审计 | `云审计各自.csv` |
-| `fib` | 斐波那契CPU基准测试 | `FIV.csv` |
-| `s3` | 统一S3存储+审计（跨云对比） | `s3.csv` |
-| `azure` | Azure专用格式 | `azure_benchmark_data.csv` |
-| `all` | 运行全部4种测试 | 全部CSV |
-| `deploy` | 仅部署函数代码，不运行测试 | 无 |
+| Value | Description | Output CSV |
+|-----|-------------|------------|
+| `audit` | native cloud storage + integrity audit | `cloud_audit_each.csv` |
+| `fib` | Fibonacci CPU benchmark | `FIV.csv` |
+| `s3` | unified S3 storage + audit (cross-cloud comparison) | `s3.csv` |
+| `azure` | Azure-specific format | `azure_benchmark_data.csv` |
+| `all` | run all 4 types of tests | all CSVs |
+| `deploy` | deploy function code only, do not run tests | none |
 
-### 云平台参数
+### Cloud Platform Parameters
 
-`Tencent`, `Ali`, `AWS`, `Azure`（不指定=全部相关平台）
+`Tencent`, `Ali`, `AWS`, `Azure` (unspecified = all related platforms)
 
-### 示例
+### Examples
 
 ```bash
-# 测试模式（快速验证：512MB/单线程/3次重复）
+# test mode (quick verification: 512MB/single-thread/3 repeats)
 java -DtestMode=true -cp ...jar Benchmark audit Tencent
 
-# 部署代码到所有平台
+# deploy code to all platforms
 java -cp ...jar Benchmark deploy
 
-# 运行腾讯云审计测试
+# run Tencent Cloud audit test
 java -cp ...jar Benchmark audit Tencent
 
-# 运行斐波那契测试
+# run Fibonacci test
 java -cp ...jar Benchmark fib
 
-# 运行S3统一存储测试
+# run S3 unified storage test
 java -cp ...jar Benchmark s3
 
-# 运行全部测试
+# run all tests
 java -cp ...jar Benchmark all
 ```
 
-### 测试模式 (`-DtestMode=true`)
+### Test Mode (`-DtestMode=true`)
 
-- 跳过 Maven 构建和函数部署
-- 仅测 512MB 内存、单线程、3次重复
-- 用于调试和快速验证流程是否正确
+- skip Maven build and function deployment
+- only test 512MB memory, single thread, 3 repeats
+- used for debugging and quickly verifying the workflow
 
-### 执行流程
+### Execution Flow
 
+``
+audit mode:
+  deploy code → KeyGen+OutSource+upload (one-time) → generate challenge
+  → for memory in [128,256,512,1024,2048]:
+       → update memory → warm-up (absorb cold start)
+       → for thread in [1,2,4,8,16]:
+            → for repeat in 1..30:
+                 → invoke SCF → verify → write CSV
+
+fib mode:
+  deploy code → for memory → warm-up → for 1..30: invoke (fib(800000), Fast Doubling) → write CSV
+
+s3 mode:
+  upload data to AWS S3 → for platform → for memory → warm-up
+  → for 1..30: invoke (storageType="s3") → write CSV (including Total_Time_ms)
 ```
-audit模式:
-  部署代码 → KeyGen+OutSource+上传(一次性) → 生成挑战
-  → for 内存 in [128,256,512,1024,2048]:
-       → 更新内存 → 预热(吸收冷启动)
-       → for 线程 in [1,2,4,8,16]:
-            → for 重复 in 1..30:
-                 → 调用SCF → 验证 → 写CSV
 
-fib模式:
-  部署代码 → for 内存 → 预热 → for 1..30: 调用(fib(800000), Fast Doubling) → 写CSV
+### Parameter Matrix
 
-s3模式:
-  上传数据到AWS S3 → for 平台 → for 内存 → 预热
-  → for 1..30: 调用(storageType="s3") → 写CSV(含Total_Time_ms)
-```
-
-### 参数矩阵
-
-| 参数 | audit | fib | s3 | azure |
+| Parameter | audit | fib | s3 | azure |
 |------|-------|-----|-----|-------|
-| 平台 | Tencent/Ali/AWS | Tencent/Ali/AWS | Tencent/Ali/AWS | Azure |
-| 内存(MB) | 128,256,512,1024,2048 | 128,256,512,1024,2048 | 256,512,1024,2048 | 固定 |
-| 线程 | 1,2,4,8,16 | — | — | 1,2,4,8,16 |
-| 重复次数 | 30 | 30 | 30 | 10 |
+| platforms | Tencent/Ali/AWS | Tencent/Ali/AWS | Tencent/Ali/AWS | Azure |
+| memory (MB) | 128,256,512,1024,2048 | 128,256,512,1024,2048 | 256,512,1024,2048 | fixed |
+| threads | 1,2,4,8,16 | — | — | 1,2,4,8,16 |
+| repetitions | 30 | 30 | 30 | 10 |
 
-**总计约3110次调用，预计运行5-12小时。**
+**Approximately 3110 calls in total, expected to run 5-12 hours.**
 
-### CSV输出格式
+### CSV Output Format
 
-**云审计各自.csv**：`CSP,Memory_MB,Thread,Run_ID,Execution_Time_ms`
-- Thread格式："1 Thread", "2 Threads" ...
+**cloud_audit_each.csv**: `CSP,Memory_MB,Thread,Run_ID,Execution_Time_ms`
+- Thread format: "1 Thread", "2 Threads" ...
 
-**FIV.csv**：`CSP,Memory_MB,Run_ID,Execution_Time_ms`
-- fib(800000) 计算时间（毫秒），Fast Doubling O(log n) 算法
+**FIV.csv**: `CSP,Memory_MB,Run_ID,Execution_Time_ms`
+- fib(800000) computation time in milliseconds, Fast Doubling O(log n) algorithm
 
-**s3.csv**：`CSP,Memory_MB,Run_ID,Execution_Time_ms,Total_Time_ms`
-- Total_Time_ms = 客户端从发起到收到响应的总时间
+**s3.csv**: `CSP,Memory_MB,Run_ID,Execution_Time_ms,Total_Time_ms`
+- Total_Time_ms = total time from client request initiation to response receipt
 
-**azure_benchmark_data.csv**：`threads,test_id,exec_time,mem_usage`
-- exec_time 单位为秒
+**azure_benchmark_data.csv**: `threads,test_id,exec_time,mem_usage`
+- exec_time unit is seconds
 
-### XML配置
+### XML Configuration
 
-编辑 `test-config.xml` 可自定义测试参数：
+Edit `test-config.xml` to customize test parameters:
 
 ```xml
 <test type="audit" enabled="true">
@@ -204,11 +202,11 @@ s3模式:
 </test>
 ```
 
-设置 `enabled="false"` 可跳过某项测试。
+Set `enabled="false"` to skip a test.
 
-## 配置
+## Configuration
 
-### Properties 文件格式
+### Properties File Format
 
 ```properties
 mavenExecutable=mvn
@@ -219,7 +217,7 @@ timeout=900
 blockNum=4
 partNum=4
 
-# 平台特定配置
+# platform-specific configuration
 secretId=<AccessKey>
 secretKey=<SecretKey>
 regionName=<Region>
@@ -229,25 +227,21 @@ handler=<HandlerClass>
 runtime=<Runtime>
 ```
 
-每个平台一个 Properties 文件（`Properties-tencent/ali/aws/azure`），Benchmark 运行时会自动将对应文件复制到 `Properties`。
+There is one Properties file per platform (`Properties-tencent/ali/aws/azure`), and Benchmark will automatically copy the corresponding file to `Properties` at runtime.
 
-### 前置条件
+### Prerequisites
 
 1. JDK 1.8+
-2. Maven（路径已配置在 Properties 的 `mavenExecutable`）
-3. 测试文件 `D:/testdata/testfile.txt`（~7MB）
-4. 阿里云需要 JRE 包：`D:/tmp/jre11.tar.gz`
-5. 各云平台已开通对象存储和云函数服务
+2. Maven (path configured in Properties `mavenExecutable`)
+3. test file `D:/testdata/testfile.txt` (~7MB)
+4. Alibaba Cloud requires JRE package: `D:/tmp/jre11.tar.gz`
+5. object storage and cloud function services enabled on each cloud platform
 
-## 关键设计决策
+## Key Design Decisions
 
-- **一次性数据准备**：KeyGen + OutSource 只执行一次，所有调用复用同一份云端数据
-- **内存热切换**：通过 SDK 的 UpdateFunctionConfiguration API 修改内存（1-2秒），无需重新部署
-- **冷启动吸收**：每个内存配置切换后执行1次预热调用
-- **Properties 切换**：复制 `Properties-{platform}` → `Properties`，现有 Control 类无需修改
-- **重试机制**：函数处于"Updating"状态时自动重试（最多10次，间隔10秒）
-- **阿里云JRE捆绑**：将JRE打包进zip，首次冷启动解压到 /tmp/jre，后续热启动直接使用
-
-## 致谢
-
-欢迎测试和探索我们的审计系统。反馈与合作请联系。
+- **One-time data preparation**: KeyGen + OutSource execute only once; all invocations reuse the same cloud-side data
+- **Memory hot switching**: modify memory with the SDK UpdateFunctionConfiguration API (1-2 seconds), no redeployment needed
+- **Cold start absorption**: perform one warm-up invocation after each memory configuration change
+- **Properties switching**: copy `Properties-{platform}` → `Properties`, existing Control classes do not need modification
+- **Retry mechanism**: automatically retry when the function is in "Updating" status (up to 10 times, 10-second intervals)
+- **Alibaba Cloud JRE bundling**: package JRE into zip, extract it to /tmp/jre on first cold start, and reuse it on subsequent warm starts
