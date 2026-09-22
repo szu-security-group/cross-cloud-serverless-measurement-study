@@ -6,6 +6,8 @@ import com.aliyun.oss.model.*;
 
 import java.io.*;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
@@ -90,7 +92,7 @@ public class AliCloudAPI {
         String uploadId = initResult.getUploadId();
 
         CountDownLatch latch = new CountDownLatch(partCount);
-        List<PartETag> partETags = new ArrayList<>();
+        List<PartETag> partETags = Collections.synchronizedList(new ArrayList<>());
 
         try {
             ExecutorService executor = Executors.newFixedThreadPool(partCount);
@@ -123,13 +125,17 @@ public class AliCloudAPI {
                     } catch (Exception e) {
                         throw new RuntimeException(e);
                     } finally {
-                        try { inputStream.close(); } catch (IOException e) { }
+                        if (inputStream != null) {
+                            try { inputStream.close(); } catch (IOException e) { }
+                        }
+                        latch.countDown();
                     }
                 });
             }
             latch.await();
             executor.shutdown();
 
+            partETags.sort(Comparator.comparingInt(PartETag::getPartNumber));
             CompleteMultipartUploadRequest completeRequest =
                     new CompleteMultipartUploadRequest(bucketName, cloudFileName, uploadId, partETags);
             ossClient.completeMultipartUpload(completeRequest);

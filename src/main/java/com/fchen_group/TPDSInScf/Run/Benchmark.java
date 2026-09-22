@@ -29,6 +29,9 @@ import java.util.*;
  *
  * Test mode (reduced iterations, skip deploy):
  *   java -DtestMode=true ... Benchmark audit Tencent
+ *
+ * Slim deploy (upload a per-platform package instead of the 82 MB shared fat jar):
+ *   java -DslimDeploy=true ... Benchmark deploy Tencent
  */
 public class Benchmark {
 
@@ -47,15 +50,23 @@ public class Benchmark {
     static final String JRE_PATH = "D:\\tmp\\jre11.tar.gz";
     static final String XML_CONFIG_PATH = PROJECT_DIR + "\\test-config.xml";
     static final String MAVEN_EXE = System.getProperty("maven.executable", "mvn");
+    static final String SLIM_DIR = PROJECT_DIR + "\\target\\slim";
 
     static Properties props;
     static Properties awsProps;  // AWS credentials for S3 unified storage test
     static boolean testMode = false;
+    static boolean skipBuild = false;
+    static boolean skipDeploy = false;
+    static boolean slimDeploy = false;
+    static final Map<Platform, File> slimJarCache = new EnumMap<>(Platform.class);
 
     // ==================== Main Entry ====================
 
     public static void main(String[] args) throws Exception {
         testMode = "true".equals(System.getProperty("testMode"));
+        skipBuild = "true".equals(System.getProperty("skipBuild"));
+        skipDeploy = "true".equals(System.getProperty("skipDeploy"));
+        slimDeploy = "true".equals(System.getProperty("slimDeploy"));
 
         // Load XML config (optional)
         Map<String, XmlConfigParser.TestConfig> xmlConfig = loadXmlConfig();
@@ -74,8 +85,8 @@ public class Benchmark {
             }
         }
 
-        // Pre-build JAR (once) unless test mode
-        if (!testMode) {
+        // Pre-build JAR (once) unless skipped
+        if (!testMode && !skipBuild) {
             prebuildJar();
         }
 
@@ -190,6 +201,63 @@ public class Benchmark {
         System.out.println("JAR built: " + JAR_PATH);
     }
 
+    /**
+     * Maven profile that produces one platform's slim deployment package.
+     * development-Ten must be excluded explicitly: it is activeByDefault, so naming a
+     * production-* profile alone activates both and the result is a fat jar again.
+     * AZURE returns null — it builds and uploads its own package via the Azure Maven plugin.
+     */
+    static String slimProfile(Platform p) {
+        switch (p) {
+            case TENCENT: return "production-Ten,!development-Ten";
+            case ALI:     return "production-Ali,!development-Ten";
+            case AWS:     return "production-AWS,!development-Ten";
+            default:      return null;
+        }
+    }
+
+    /**
+     * Build one platform's slim package into target/slim/&lt;Platform&gt;.jar.
+     * -DbenchmarkJarName redirects the assembly output to a separate file so the client jar
+     * at JAR_PATH — which this JVM keeps loading classes from — is never overwritten.
+     */
+    static File buildSlimPackage(Platform p) throws Exception {
+        String profile = slimProfile(p);
+        if (profile == null) return new File(JAR_PATH);
+
+        String jarName = "slim" + p;
+        System.out.println("=== Building slim package for " + p + " (" + profile + ") ===");
+        ProcessBuilder pb = new ProcessBuilder();
+        pb.directory(new File(PROJECT_DIR));
+        pb.command(MAVEN_EXE, "package", "-P" + profile, "-DskipTests",
+                   "-DbenchmarkJarName=" + jarName);
+        pb.inheritIO();
+        if (pb.start().waitFor() != 0) {
+            throw new RuntimeException("Slim build failed for " + p);
+        }
+
+        File built = new File(PROJECT_DIR + "\\target\\" + jarName + "-jar-with-dependencies.jar");
+        File out = new File(SLIM_DIR + "\\" + p + ".jar");
+        out.getParentFile().mkdirs();
+        Files.copy(built.toPath(), out.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        System.out.println("Slim package: " + out + " (" + out.length() / 1048576 + " MB)");
+        return out;
+    }
+
+    /**
+     * The jar to upload for a platform: its slim package when -DslimDeploy=true, otherwise
+     * the shared fat client jar. Cached so a platform is built at most once per JVM run.
+     */
+    static File jarFor(Platform p) throws Exception {
+        if (!slimDeploy) return new File(JAR_PATH);
+        File cached = slimJarCache.get(p);
+        if (cached == null) {
+            cached = buildSlimPackage(p);
+            slimJarCache.put(p, cached);
+        }
+        return cached;
+    }
+
     // ================================================================
     //  AUDIT benchmark — 云审计各自.csv
     //  CSP,Memory_MB,Thread,Run_ID,Execution_Time_ms
@@ -222,7 +290,7 @@ public class Benchmark {
         swapProperties(p);
         props = loadProperties();
 
-        if (!testMode) deployCode(p);
+        if (!testMode && !skipDeploy) deployCode(p);
         if (p == Platform.AWS) { System.out.println("  Waiting 60s for AWS deployment to settle..."); Thread.sleep(60000); }
 
         IntegrityAuditing ia = prepareData(p);
@@ -300,7 +368,7 @@ public class Benchmark {
         swapProperties(p);
         props = loadProperties();
 
-        if (!testMode) deployCode(p);
+        if (!testMode && !skipDeploy) deployCode(p);
 
         for (int memMB : memSizes) {
             System.out.println("  Memory=" + memMB + "MB");
@@ -379,7 +447,7 @@ public class Benchmark {
         swapProperties(p);
         props = loadProperties();
 
-        if (!testMode) deployCode(p);
+        if (!testMode && !skipDeploy) deployCode(p);
 
         for (int memMB : memSizes) {
             System.out.println("  Memory=" + memMB + "MB");
@@ -435,7 +503,7 @@ public class Benchmark {
         swapProperties(Platform.AZURE);
         props = loadProperties();
 
-        if (!testMode) deployCode(Platform.AZURE);
+        if (!testMode && !skipDeploy) deployCode(Platform.AZURE);
 
         IntegrityAuditing ia = prepareData(Platform.AZURE);
         ChallengeData cd = ia.audit(CHALLENGE_LEN);
@@ -501,16 +569,18 @@ public class Benchmark {
     // ==================== Initial Deploy ====================
 
     static void deployCode(Platform p) throws Exception {
-        System.out.println("Deploying function code for " + p + "...");
+        File jar = jarFor(p);
+        System.out.println("Deploying function code for " + p + " ["
+            + jar.getName() + ", " + jar.length() / 1048576 + " MB]...");
         switch (p) {
-            case TENCENT: deployTencent(); break;
-            case ALI:     deployAli(); break;
-            case AWS:     deployAws(); break;
+            case TENCENT: deployTencent(jar); break;
+            case ALI:     deployAli(jar); break;
+            case AWS:     deployAws(jar); break;
             case AZURE:   deployAzure(); break;
         }
     }
 
-    static void deployTencent() throws Exception {
+    static void deployTencent(File jar) throws Exception {
         String secretId = props.getProperty("secretId");
         String secretKey = props.getProperty("secretKey");
         String region = props.getProperty("regionName");
@@ -521,7 +591,7 @@ public class Benchmark {
         int timeout = Integer.parseInt(props.getProperty("timeout"));
 
         CloudAPI cosAPI = new CloudAPI(CONFIG_DIR);
-        cosAPI.multipartUpload(JAR_PATH, 4, "function.jar");
+        cosAPI.multipartUpload(jar.getAbsolutePath(), 4, "function.jar");
         System.out.println("JAR uploaded to COS");
 
         com.tencentcloudapi.common.Credential cred =
@@ -567,7 +637,7 @@ public class Benchmark {
         }
     }
 
-    static void deployAli() throws Exception {
+    static void deployAli(File jar) throws Exception {
         String region = props.getProperty("regionName");
         String bucketName = props.getProperty("bucketName");
         String functionName = props.getProperty("functionName");
@@ -579,12 +649,16 @@ public class Benchmark {
         int timeout = Integer.parseInt(props.getProperty("timeout"));
 
         String zipPath = PROJECT_DIR + "\\target\\function.zip";
-        createAliZip(JAR_PATH, JRE_PATH, zipPath);
+        createAliZip(jar.getAbsolutePath(), JRE_PATH, zipPath);
         System.out.println("Ali zip created: " + zipPath);
 
         AliCloudAPI aliAPI = new AliCloudAPI(CONFIG_DIR);
-        aliAPI.uploadFile(zipPath, "function.zip");
-        System.out.println("Zip uploaded to OSS");
+        // A single PUT of the 50-120 MB deploy zip gets reset by the Tokyo link
+        // (7 MB succeeds, 52 MB does not), so upload it in ~8 MB parts.
+        long zipBytes = new File(zipPath).length();
+        int parts = (int) Math.min(16, Math.max(1, zipBytes / (8L * 1024 * 1024)));
+        aliAPI.multipartUpload(zipPath, parts, "function.zip");
+        System.out.println("Zip uploaded to OSS (" + parts + " parts)");
 
         String fcEndpoint = accountId + "." + region + ".fc.aliyuncs.com";
         com.aliyun.teaopenapi.models.Config config = new com.aliyun.teaopenapi.models.Config()
@@ -672,7 +746,7 @@ public class Benchmark {
         }
     }
 
-    static void deployAws() throws Exception {
+    static void deployAws(File jar) throws Exception {
         String secretId = props.getProperty("secretId");
         String secretKey = props.getProperty("secretKey");
         String region = props.getProperty("regionName");
@@ -691,7 +765,7 @@ public class Benchmark {
                 .withCredentials(new com.amazonaws.auth.AWSStaticCredentialsProvider(awsCreds))
                 .withRegion(region)
                 .build();
-        s3Client.putObject(bucketName, "function-aws.jar", new File(JAR_PATH));
+        s3Client.putObject(bucketName, "function-aws.jar", jar);
         System.out.println("JAR uploaded to S3");
 
         com.amazonaws.services.lambda.AWSLambda lambdaClient =
@@ -733,7 +807,7 @@ public class Benchmark {
     static void deployAzure() throws Exception {
         System.out.println("Azure deploy via Maven plugin...");
         String mvn = props.getProperty("mavenExecutable");
-        String profile = "-Pdevelopment-Azure";
+        String profile = "-Pproduction-Azure,!development-Ten";
         // 1) azure-functions:package — creates target/azure-functions/<appName> staging dir
         runMvn(mvn, "azure-functions:package", profile);
         // 2) azure-functions:deploy
@@ -1071,9 +1145,14 @@ public class Benchmark {
 
     static void runColdStartBenchmark(XmlConfigParser.TestConfig cfg, Set<Platform> cliPlatforms) throws Exception {
         Set<Platform> platforms = resolvePlatforms(cfg, cliPlatforms);
-        platforms.remove(Platform.AZURE); // Consumption Plan has no memory update API
+        boolean hasAzure = platforms.remove(Platform.AZURE);
+
+        if (hasAzure) {
+            runAzureColdStart(cfg);
+        }
+
         if (platforms.isEmpty()) {
-            System.out.println("No platforms with memory-switch capability for cold start test.");
+            if (!hasAzure) System.out.println("No platforms with memory-switch capability for cold start test.");
             return;
         }
 
@@ -1081,15 +1160,15 @@ public class Benchmark {
         int[] memPairs = testMode ? new int[]{512, 1024} : (cfg != null && cfg.memorySizes != null ? cfg.memorySizes : DEFAULT_MEMORY_SIZES);
         int reps = 3; // cold start: 3 measurements per memory switch
 
-        writeCsvHeader(csvPath, "CSP,Memory_MB,Is_Cold,Run_ID,Execution_Time_ms,Instance_ID");
+        writeCsvHeader(csvPath, "CSP,Memory_MB,Is_Cold,Run_ID,Execution_Time_ms,Instance_ID,Total_Time_ms");
 
-        if (!testMode) prebuildJar();
+        if (!testMode && !skipBuild) prebuildJar();
 
         for (Platform p : platforms) {
             System.out.println("\n=== COLD START: " + cspName(p) + " ===");
             swapProperties(p);
             props = loadProperties();
-            deployCode(p);
+            if (!testMode && !skipDeploy) deployCode(p);
 
             // One-time data preparation (same as audit)
             IntegrityAuditing ia = prepareData(p);
@@ -1122,19 +1201,25 @@ public class Benchmark {
                 // Measure cold start at B
                 for (int r = 1; r <= reps; r++) {
                     long execMs = -1;
+                    long totalMs = -1;
                     boolean isCold = false;
                     try {
+                        long t0 = System.nanoTime();
                         String json = invokeFunction(p, payload);
+                        long t1 = System.nanoTime();
+                        totalMs = (t1 - t0) / 1_000_000;
                         ResponseClass resp = JSON.parseObject(json, ResponseClass.class);
                         execMs = (resp.download_time + resp.proofTime) / 1_000_000;
                         currId = resp.instanceId != null ? resp.instanceId : "unknown";
                         isCold = (prevId != null && !currId.equals(prevId));
-                        System.out.println("    B(" + memB + "MB) run=" + r + " instance=" + currId + " cold=" + isCold + " time=" + execMs + "ms");
+                        System.out.println("    B(" + memB + "MB) run=" + r + " instance=" + currId + " cold=" + isCold + " time=" + execMs + "ms total=" + totalMs + "ms");
                         prevId = currId;
                     } catch (Exception e) {
                         System.err.println("    B call failed: " + e.getMessage());
+                        currId = null;
+                        totalMs = -1;
                     }
-                    appendCsvRow(csvPath, cspName(p) + "," + memB + "," + isCold + "," + r + "," + (execMs >= 0 ? execMs : "Failed") + "," + (currId != null ? currId : ""));
+                    appendCsvRow(csvPath, cspName(p) + "," + memB + "," + isCold + "," + r + "," + (execMs >= 0 ? execMs : "Failed") + "," + (currId != null ? currId : "") + "," + (totalMs >= 0 ? totalMs : "Failed"));
                     if (r < reps) Thread.sleep(2000);
                 }
 
@@ -1155,24 +1240,102 @@ public class Benchmark {
 
                 for (int r = 1; r <= reps; r++) {
                     long execMs = -1;
+                    long totalMs = -1;
                     boolean isCold = false;
                     try {
+                        long t0 = System.nanoTime();
                         String json = invokeFunction(p, payload);
+                        long t1 = System.nanoTime();
+                        totalMs = (t1 - t0) / 1_000_000;
                         ResponseClass resp = JSON.parseObject(json, ResponseClass.class);
                         execMs = (resp.download_time + resp.proofTime) / 1_000_000;
                         currId = resp.instanceId != null ? resp.instanceId : "unknown";
                         isCold = (prevId != null && !currId.equals(prevId));
-                        System.out.println("    A(" + memA + "MB) run=" + r + " instance=" + currId + " cold=" + isCold + " time=" + execMs + "ms");
+                        System.out.println("    A(" + memA + "MB) run=" + r + " instance=" + currId + " cold=" + isCold + " time=" + execMs + "ms total=" + totalMs + "ms");
                         prevId = currId;
                     } catch (Exception e) {
                         System.err.println("    A call failed: " + e.getMessage());
+                        currId = null;
+                        totalMs = -1;
                     }
-                    appendCsvRow(csvPath, cspName(p) + "," + memA + "," + isCold + "," + r + "," + (execMs >= 0 ? execMs : "Failed") + "," + (currId != null ? currId : ""));
+                    appendCsvRow(csvPath, cspName(p) + "," + memA + "," + isCold + "," + r + "," + (execMs >= 0 ? execMs : "Failed") + "," + (currId != null ? currId : "") + "," + (totalMs >= 0 ? totalMs : "Failed"));
                     if (r < reps) Thread.sleep(2000);
                 }
             }
         }
         System.out.println("Cold start benchmark complete → " + csvPath);
+    }
+
+    // ================================================================
+    //  AZURE COLD START — azure_cold_start.csv
+    //  Azure Consumption Plan has no memory-switch API.
+    //  Uses time-based waiting for instance recycling + instanceId comparison.
+    //  Also records allocatedMemoryMB to determine MinimumMemory.
+    //  CSP,Run_ID,Execution_Time_ms,Instance_ID,Allocated_Memory_MB,Total_Time_ms
+    // ================================================================
+
+    static void runAzureColdStart(XmlConfigParser.TestConfig cfg) throws Exception {
+        int reps = testMode ? 3 : 10;
+        int waitMinutes = testMode ? 2 : 30;
+
+        String csvPath = PROJECT_DIR + "\\azure_cold_start.csv";
+        writeCsvHeader(csvPath, "CSP,Run_ID,Execution_Time_ms,Instance_ID,Allocated_Memory_MB,Total_Time_ms");
+
+        System.out.println("\n=== AZURE COLD START ===");
+        System.out.println("  Reps=" + reps + "  Wait between runs=" + waitMinutes + "min");
+        swapProperties(Platform.AZURE);
+        props = loadProperties();
+        if (!testMode && !skipDeploy) deployCode(Platform.AZURE);
+
+        IntegrityAuditing ia = prepareData(Platform.AZURE);
+        ChallengeData cd = ia.audit(CHALLENGE_LEN);
+        String payload = buildAuditPayload(cd, 1); // single thread for cold start
+
+        String prevInstanceId = null;
+
+        for (int run = 1; run <= reps; run++) {
+            long execMs = -1;
+            long totalMs = -1;
+            boolean isCold = false;
+            String instanceId = null;
+            long allocatedMemMB = -1;
+
+            try {
+                long t0 = System.nanoTime();
+                String json = invokeFunction(Platform.AZURE, payload);
+                long t1 = System.nanoTime();
+                totalMs = (t1 - t0) / 1_000_000;
+                ResponseClass resp = JSON.parseObject(json, ResponseClass.class);
+                execMs = (resp.download_time + resp.proofTime) / 1_000_000;
+                instanceId = resp.instanceId != null ? resp.instanceId : "unknown";
+                allocatedMemMB = resp.allocatedMemoryMB != null ? resp.allocatedMemoryMB : -1;
+                isCold = (prevInstanceId != null && !instanceId.equals(prevInstanceId));
+
+                System.out.println("  run=" + run + " instance=" + instanceId
+                    + " cold=" + isCold + " time=" + execMs + "ms total=" + totalMs + "ms mem=" + allocatedMemMB + "MB");
+
+                prevInstanceId = instanceId;
+            } catch (Exception e) {
+                System.err.println("  Invoke failed: run=" + run + " - " + e.getMessage());
+                instanceId = null;
+                totalMs = -1;
+            }
+
+            appendCsvRow(csvPath, "Azure," + run + ","
+                + (execMs >= 0 ? execMs : "Failed") + ","
+                + (instanceId != null ? instanceId : "") + ","
+                + allocatedMemMB + ","
+                + (totalMs >= 0 ? totalMs : "Failed"));
+
+            if (run < reps) {
+                System.out.println("  Waiting " + waitMinutes + "min for instance recycling...");
+                Thread.sleep(waitMinutes * 60 * 1000L);
+            }
+        }
+
+        System.out.println("Azure cold start complete → " + csvPath);
+        System.out.println("  MinimumMemory = min of Allocated_Memory_MB column");
+        System.out.println("  Cold start time = execution times where instanceId changed");
     }
 
     /** 云审计各自.csv row */

@@ -111,7 +111,9 @@ public class AzureHandle {
         ResponseClass responseClass = new ResponseClass(proofData);
         responseClass.download_time = end_time_download - start_time_download;
         responseClass.proofTime = end_time_proof - start_time_proof;
-        responseClass.instanceId = context.getInvocationId();
+        String hostInstanceId = System.getenv("WEBSITE_INSTANCE_ID");
+        responseClass.instanceId = hostInstanceId != null ? hostInstanceId : context.getInvocationId();
+        responseClass.allocatedMemoryMB = Runtime.getRuntime().maxMemory() / (1024 * 1024);
 
         String output = JSON.toJSONString(responseClass);
         context.getLogger().info("result:" + output);
@@ -151,7 +153,8 @@ public class AzureHandle {
         resp.download_time = 0L;
         resp.proofTime = elapsed;
         resp.proofData = null;
-        resp.instanceId = context.getInvocationId();
+        String hostInstanceId = System.getenv("WEBSITE_INSTANCE_ID");
+        resp.instanceId = hostInstanceId != null ? hostInstanceId : context.getInvocationId();
         context.getLogger().info("fib(" + n + ") time=" + elapsed + " digits=" + result.length());
         return JSON.toJSONString(resp);
     }

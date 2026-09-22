@@ -6,6 +6,77 @@ We focus on practical performance characteristics, including stability, cold-sta
 
 ---
 
+## Quick Start
+
+### 1. Clone
+
+```bash
+git clone https://github.com/szu-security-group/cross-cloud-serverless-measurement-study.git
+cd cross-cloud-serverless-measurement-study
+```
+
+### 2. Prerequisites
+
+| # | Requirement |
+|---|-------------|
+| 1 | JDK 1.8+ (`java -version`) |
+| 2 | Maven; record its full path if it is not on `PATH` |
+| 3 | Test file `D:/testdata/testfile.txt` (~7 MB) |
+| 4 | Alibaba Cloud only: `D:/tmp/jre11.tar.gz` (Corretto 11, Linux x64) |
+| 5 | One object-storage bucket and one cloud function per platform, **created in advance** — the code deploys onto existing resources, it does not create them |
+
+Create the test file:
+
+```powershell
+# Windows PowerShell
+$size = 7475448; $bytes = new-object byte[] $size; (new-object Random).NextBytes($bytes); [IO.File]::WriteAllBytes("D:\testdata\testfile.txt", $bytes)
+```
+
+```bash
+# Linux / macOS
+dd if=/dev/urandom of=/root/testdata/testfile.txt bs=1024 count=7301
+```
+
+### 3. Configure
+
+Fill in `Properties-tencent`, `Properties-ali`, `Properties-aws` and
+`Properties-azure`. Each file holds the credentials, region, bucket and function
+name for one platform. See [Configuration](#configuration) for the field list.
+
+Benchmark copies the matching platform file to `Properties` before each run, so
+only the four per-platform files need editing.
+
+### 4. Build
+
+```bash
+mvn package -Pdevelopment-Azure -DskipTests
+```
+
+### 5. Verify (fast)
+
+```bash
+java -DtestMode=true -cp target/TPDSInSCF-1.0-SNAPSHOT_Benchmark-jar-with-dependencies.jar com.fchen_group.TPDSInScf.Run.Benchmark audit Tencent
+```
+
+Test mode skips build and deployment and runs 512 MB / single thread / 3 repeats
+(~30 s). A run that finishes without `VERIFY FAILED` means the protocol and
+credentials are working.
+
+### 6. Deploy and run
+
+```bash
+# upload handler code to the cloud (the function must already exist)
+java -cp target/TPDSInSCF-1.0-SNAPSHOT_Benchmark-jar-with-dependencies.jar com.fchen_group.TPDSInScf.Run.Benchmark deploy
+
+# run the full audit benchmark
+java -cp target/TPDSInSCF-1.0-SNAPSHOT_Benchmark-jar-with-dependencies.jar com.fchen_group.TPDSInScf.Run.Benchmark audit Tencent
+```
+
+Run every command from the project root: CSV output is written to the current
+working directory.
+
+---
+
 ## Project Structure
 
 ```
@@ -33,13 +104,9 @@ src/main/java/com/fchen_group/TPDSInScf/
 │   ├── TenHandle.java             # Tencent Cloud SCF handler
 │   ├── AliHandle.java             # Alibaba Cloud FC handler
 │   ├── AwsHandle.java             # AWS Lambda handler
-│   ├── AzureHandle.java           # Azure Functions handler
-│   ├── Client.java                # manual test entry
-│   ├── AliClient.java
-│   ├── AwsClient.java
-│   └── AzureClient.java
+│   └── AzureHandle.java           # Azure Functions handler
 │
-├── Properties                     # currently active platform configuration
+├── Properties                     # active config, copied from Properties-{platform} at runtime
 ├── Properties-tencent             # Tencent Cloud configuration
 ├── Properties-ali                 # Alibaba Cloud configuration
 ├── Properties-aws                 # AWS configuration
@@ -77,7 +144,7 @@ Parameters: n=255, k=223, GF(2⁸), challenge length l=460, test file ~7MB.
 
 This project uses **Java 1.8** + **Maven**, and supports four cloud platforms (Tencent Cloud / Alibaba Cloud / AWS / Azure).
 
-Configure the **Properties** file to access object storage and SCF services, and specify the location for intermediate auditing files.
+Configure the per-platform `Properties-*` files to access object storage and SCF services, and specify the location for intermediate auditing files.
 
 ```bash
 # Build a JAR containing all platform SDKs using development-Azure profile
@@ -85,14 +152,6 @@ mvn package -Pdevelopment-Azure -DskipTests
 ```
 
 Build artifact: `target/TPDSInSCF-1.0-SNAPSHOT_Benchmark-jar-with-dependencies.jar`
-
-## Manual Run (Single Test)
-
-After packaging, place the **Properties** file in the same directory as the JAR and run:
-
-```bash
-java -cp TPDSInSCF-1.0-SNAPSHOT_Benchmark-jar-with-dependencies.jar com.fchen_group.TPDSInScf.Run.Client
-```
 
 ## Automated Testing (Benchmark)
 
@@ -110,7 +169,8 @@ java -cp <JAR> com.fchen_group.TPDSInScf.Run.Benchmark [test type] [cloud platfo
 | `fib` | Fibonacci CPU benchmark | `FIV.csv` |
 | `s3` | unified S3 storage + audit (cross-cloud comparison) | `s3.csv` |
 | `azure` | Azure-specific format | `azure_benchmark_data.csv` |
-| `all` | run all 4 types of tests | all CSVs |
+| `coldstart` | cold-start measurement (memory switching and instance recycling) | `cold_start.csv`, `azure_cold_start.csv` |
+| `all` | run all 5 types of tests | all CSVs |
 | `deploy` | deploy function code only, do not run tests | none |
 
 ### Cloud Platform Parameters
@@ -147,7 +207,7 @@ java -cp ...jar Benchmark all
 
 ### Execution Flow
 
-``
+```
 audit mode:
   deploy code → KeyGen+OutSource+upload (one-time) → generate challenge
   → for memory in [128,256,512,1024,2048]:
@@ -162,23 +222,34 @@ fib mode:
 s3 mode:
   upload data to AWS S3 → for platform → for memory → warm-up
   → for 1..30: invoke (storageType="s3") → write CSV (including Total_Time_ms)
+
+coldstart mode:
+  for platform → for memory configuration:
+       → invoke, then compare instanceId with the previous invocation
+       → instanceId changed = cold start → write CSV
+  Azure: fixed memory (no switch API), wait for instance recycling between runs
 ```
 
 ### Parameter Matrix
 
-| Parameter | audit | fib | s3 | azure |
-|------|-------|-----|-----|-------|
-| platforms | Tencent/Ali/AWS | Tencent/Ali/AWS | Tencent/Ali/AWS | Azure |
-| memory (MB) | 128,256,512,1024,2048 | 128,256,512,1024,2048 | 256,512,1024,2048 | fixed |
-| threads | 1,2,4,8,16 | — | — | 1,2,4,8,16 |
-| repetitions | 30 | 30 | 30 | 10 |
+| Parameter | audit | fib | s3 | azure | coldstart |
+|------|-------|-----|-----|-------|-----------|
+| platforms | Tencent/Ali/AWS | Tencent/Ali/AWS | Tencent/Ali/AWS | Azure | Tencent/Ali/AWS + Azure |
+| memory (MB) | 128,256,512,1024,2048 | 128,256,512,1024,2048 | 256,512,1024,2048 | fixed | adjacent pairs of memorySizes |
+| threads | 1,2,4,8,16 | — | — | 1,2,4,8,16 | — |
+| repetitions | 30 | 30 | 30 | 10 | 3 |
 
-**Approximately 3110 calls in total, expected to run 5-12 hours.**
+**Approximately 3110 calls for the audit / fib / s3 / azure tests, plus the
+`coldstart` runs; expected to run 5-12 hours.**
 
 ### CSV Output Format
 
+Output filenames are not hard-coded: each test writes to the name given by its
+`csvFile` entry in `test-config.xml`. The names below are the defaults.
+
 **cloud_audit_each.csv**: `CSP,Memory_MB,Thread,Run_ID,Execution_Time_ms`
 - Thread format: "1 Thread", "2 Threads" ...
+- Execution_Time_ms = time inside the cloud function (download + proof computation)
 
 **FIV.csv**: `CSP,Memory_MB,Run_ID,Execution_Time_ms`
 - fib(800000) computation time in milliseconds, Fast Doubling O(log n) algorithm
@@ -188,6 +259,15 @@ s3 mode:
 
 **azure_benchmark_data.csv**: `threads,test_id,exec_time,mem_usage`
 - exec_time unit is seconds
+
+**cold_start.csv** (Tencent / Ali / AWS): `CSP,Memory_MB,Is_Cold,Run_ID,Execution_Time_ms,Instance_ID`
+
+**azure_cold_start.csv**: `CSP,Run_ID,Execution_Time_ms,Instance_ID,Allocated_Memory_MB`
+- Allocated_Memory_MB = memory the platform actually assigned (Azure Consumption Plan)
+
+All CSVs are opened in **append** mode: an interrupted run keeps the rows already
+written. Re-running the same test restarts from the first parameter, so delete the
+CSV first if you want a clean rerun.
 
 ### XML Configuration
 
@@ -203,6 +283,41 @@ Edit `test-config.xml` to customize test parameters:
 ```
 
 Set `enabled="false"` to skip a test.
+
+## Cost Model
+
+Serverless platforms bill on two axes: **allocated memory** and **execution
+time**. The billed quantity for one invocation is therefore
+
+```
+GB·s = (Memory_MB / 1024) × Execution_Time_s
+```
+
+This is the **cost efficiency** metric reported in the paper. The two axes are
+not independent: on most platforms a larger memory tier also receives
+proportionally more vCPU, so raising memory shortens execution time. For this
+workload execution time falls faster than the per-second rate rises, which means
+the cheapest configuration is usually *not* the smallest one.
+
+The total cost of a benchmark run follows directly from the recorded data:
+
+```
+Total_GB·s = Σ (Memory_MB / 1024) × (Execution_Time_ms / 1000)
+```
+
+Every CSV records both `Memory_MB` and `Execution_Time_ms` for each invocation,
+so this sum can be computed from the output files without re-running anything.
+
+Two caveats when comparing against an actual bill:
+
+- Platforms round billed duration up (typically to 1 ms or 100 ms granularity),
+  so real charges run slightly higher than this estimate.
+- Cold-start invocations are billed for their full duration, including
+  initialization overhead — the `coldstart` test exists to measure that cost.
+
+Unit prices differ per platform, region and memory tier, and change over time, so
+no price table is hard-coded here. Multiply `Total_GB·s` by the current rate for
+the region under test.
 
 ## Configuration
 

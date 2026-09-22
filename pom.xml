@@ -14,6 +14,9 @@
         <java.version>1.8</java.version>
         <maven.compiler.source>1.8</maven.compiler.source>
         <maven.compiler.target>1.8</maven.compiler.target>
+        <!-- Fat-jar name. Override with -DbenchmarkJarName=... to build a slim package
+             to a different file instead of overwriting the client jar. -->
+        <benchmarkJarName>TPDSInSCF-1.0-SNAPSHOT_Benchmark</benchmarkJarName>
     </properties>
 
     <repositories>
@@ -59,7 +62,34 @@
                     <artifactId>tencentcloud-sdk-java</artifactId>
                     <version>3.1.1013</version>
                 </dependency>
+                <!-- AWS S3 SDK: used by handleAuditS3 (s3 cross-cloud test) -->
+                <dependency>
+                    <groupId>com.amazonaws</groupId>
+                    <artifactId>aws-java-sdk-s3</artifactId>
+                    <version>1.12.770</version>
+                </dependency>
             </dependencies>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <configuration>
+                            <excludes>
+                                <exclude>**/AliHandle.java</exclude>
+                                <exclude>**/AwsHandle.java</exclude>
+                                <exclude>**/AzureHandle.java</exclude>
+                                <exclude>**/AliCloudAPI.java</exclude>
+                                <exclude>**/AliYunControl.java</exclude>
+                                <exclude>**/AwsControl.java</exclude>
+                                <exclude>**/AzureControl.java</exclude>
+                                <exclude>**/Benchmark.java</exclude>
+                                <exclude>**/XmlConfigParser.java</exclude>
+                            </excludes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
         </profile>
 
         <profile>
@@ -97,7 +127,31 @@
                     <artifactId>fc20230330</artifactId>
                     <version>4.1.2</version>
                 </dependency>
+                <!-- AWS S3 SDK: used by handleAuditS3 (s3 cross-cloud test) -->
+                <dependency>
+                    <groupId>com.amazonaws</groupId>
+                    <artifactId>aws-java-sdk-s3</artifactId>
+                    <version>1.12.770</version>
+                </dependency>
             </dependencies>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <configuration>
+                            <excludes>
+                                <exclude>**/AwsHandle.java</exclude>
+                                <exclude>**/AzureHandle.java</exclude>
+                                <exclude>**/AwsControl.java</exclude>
+                                <exclude>**/AzureControl.java</exclude>
+                                <exclude>**/Benchmark.java</exclude>
+                                <exclude>**/XmlConfigParser.java</exclude>
+                            </excludes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
         </profile>
 
         <profile>
@@ -119,7 +173,35 @@
                     <version>4.1.2</version>
                     <scope>provided</scope>
                 </dependency>
+                <!-- AWS S3 SDK: used by handleAuditS3 (s3 cross-cloud test) -->
+                <dependency>
+                    <groupId>com.amazonaws</groupId>
+                    <artifactId>aws-java-sdk-s3</artifactId>
+                    <version>1.12.770</version>
+                </dependency>
             </dependencies>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <configuration>
+                            <excludes>
+                                <exclude>**/TenHandle.java</exclude>
+                                <exclude>**/AwsHandle.java</exclude>
+                                <exclude>**/AzureHandle.java</exclude>
+                                <exclude>**/CloudAPI.java</exclude>
+                                <exclude>**/TenYunControl.java</exclude>
+                                <exclude>**/AliYunControl.java</exclude>
+                                <exclude>**/AwsControl.java</exclude>
+                                <exclude>**/AzureControl.java</exclude>
+                                <exclude>**/Benchmark.java</exclude>
+                                <exclude>**/XmlConfigParser.java</exclude>
+                            </excludes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
         </profile>
 
         <profile>
@@ -147,7 +229,35 @@
                     <version>3.1.1013</version>
                     <scope>provided</scope>
                 </dependency>
+                <!-- AWS S3 SDK: used by handleAuditS3 (s3 cross-cloud test) -->
+                <dependency>
+                    <groupId>com.amazonaws</groupId>
+                    <artifactId>aws-java-sdk-s3</artifactId>
+                    <version>1.12.770</version>
+                </dependency>
             </dependencies>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <configuration>
+                            <excludes>
+                                <exclude>**/AliHandle.java</exclude>
+                                <exclude>**/AwsHandle.java</exclude>
+                                <exclude>**/AzureHandle.java</exclude>
+                                <exclude>**/AliCloudAPI.java</exclude>
+                                <exclude>**/AliYunControl.java</exclude>
+                                <exclude>**/AwsControl.java</exclude>
+                                <exclude>**/AzureControl.java</exclude>
+                                <exclude>**/TenYunControl.java</exclude>
+                                <exclude>**/Benchmark.java</exclude>
+                                <exclude>**/XmlConfigParser.java</exclude>
+                            </excludes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
         </profile>
 
 
@@ -204,6 +314,22 @@
                     <version>1.12.770</version>
                 </dependency>
             </dependencies>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <configuration>
+                            <excludes>
+                                <exclude>**/AzureHandle.java</exclude>
+                                <exclude>**/AzureControl.java</exclude>
+                                <exclude>**/Benchmark.java</exclude>
+                                <exclude>**/XmlConfigParser.java</exclude>
+                            </excludes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
         </profile>
 
         <profile>
@@ -231,6 +357,28 @@
                     <version>1.12.770</version>
                 </dependency>
             </dependencies>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <configuration>
+                            <excludes>
+                                <exclude>**/TenHandle.java</exclude>
+                                <exclude>**/AliHandle.java</exclude>
+                                <exclude>**/AzureHandle.java</exclude>
+                                <exclude>**/CloudAPI.java</exclude>
+                                <exclude>**/AliCloudAPI.java</exclude>
+                                <exclude>**/TenYunControl.java</exclude>
+                                <exclude>**/AliYunControl.java</exclude>
+                                <exclude>**/AzureControl.java</exclude>
+                                <exclude>**/Benchmark.java</exclude>
+                                <exclude>**/XmlConfigParser.java</exclude>
+                            </excludes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
         </profile>
 
         <profile>
@@ -380,11 +528,28 @@
                     <groupId>com.microsoft.azure.functions</groupId>
                     <artifactId>azure-functions-java-library</artifactId>
                     <version>2.2.0</version>
-                    <scope>provided</scope>
                 </dependency>
             </dependencies>
             <build>
                 <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <configuration>
+                            <excludes>
+                                <exclude>**/TenHandle.java</exclude>
+                                <exclude>**/AliHandle.java</exclude>
+                                <exclude>**/AwsHandle.java</exclude>
+                                <exclude>**/CloudAPI.java</exclude>
+                                <exclude>**/AliCloudAPI.java</exclude>
+                                <exclude>**/TenYunControl.java</exclude>
+                                <exclude>**/AliYunControl.java</exclude>
+                                <exclude>**/AwsControl.java</exclude>
+                                <exclude>**/Benchmark.java</exclude>
+                                <exclude>**/XmlConfigParser.java</exclude>
+                            </excludes>
+                        </configuration>
+                    </plugin>
                     <plugin>
                         <groupId>com.microsoft.azure</groupId>
                         <artifactId>azure-functions-maven-plugin</artifactId>
@@ -436,7 +601,7 @@
                             <goal>single</goal>
                         </goals>
                         <configuration>
-                            <finalName>${project.build.finalName}_Benchmark</finalName>
+                            <finalName>${benchmarkJarName}</finalName>
                             <archive>
                                 <manifest>
                                     <addClasspath>true</addClasspath>

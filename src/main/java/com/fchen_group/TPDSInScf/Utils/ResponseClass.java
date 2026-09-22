@@ -9,6 +9,7 @@ public class ResponseClass {
     public Long proofTime;
     public ProofData proofData;
     public String instanceId;
+    public Long allocatedMemoryMB;
 
 
 

@@ -2,8 +2,6 @@ package com.fchen_group.TPDSInScf.Core;
 
 import com.fchen_group.TPDSInScf.Utils.ReedSolomon.Galois;
 import com.fchen_group.TPDSInScf.Utils.ReedSolomon.ReedSolomon;
-import com.tencentcloudapi.ocr.v20181119.models.VehicleRegCertInfo;
-import com.tencentcloudapi.tsf.v20180326.models.GatewayGroupIds;
 
 import java.io.File;
 import java.io.FileInputStream;
