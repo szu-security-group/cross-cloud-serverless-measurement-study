@@ -136,20 +136,7 @@ files are append-only (`Benchmark.java:53`).
 ## Measurement Settings
 
 Everything needed to rerun the reported numbers. The [Parameter Matrix](#parameter-matrix)
-below says *what* is swept; this section says *where, when and on which runtimes*.
-
-### Measurement rounds
-
-| Round | Dates | Notes |
-|-------|-------|-------|
-| Paper (§5) | 2025-01 / 2025-05 / 2025-10 | one block at 12:00 and one at 18:00 on each measurement day, 5 runs per block → 30 repetitions per configuration |
-| Re-measurement | 2026-06-20 | first end-to-end rerun on all four platforms |
-| Re-measurement | 2026-09-22 – 2026-09-25 | second round; adds `Total_Time_ms`, the idle cold-start trigger and the Azure memory probes |
-
-The two 2026 rounds agree with each other within a few percent on the
-configurations both cover. Where they disagree with the paper's numbers, the
-CSVs keep every raw per-invocation row, so the difference can be re-derived
-rather than taken on trust.
+below says *what* is swept; this section says *where and on which runtimes*.
 
 ### Platform, region, runtime
 
@@ -357,17 +344,11 @@ the other CSVs, which are milliseconds), and `mem_usage` is the instance's peak
 **private commit** over the invocation, as reported by the platform's own
 counter `WEBSITE_COUNTERS_APP.privateBytes` (`Benchmark.java:581-588`).
 
-That counter is the billing caliber: the Consumption plan charges on
-`PrivateMemorySize64` (private memory of the process *and its children*),
-rounded up to the next 128 MB and capped at 1536 MB. It is deliberately **not**
-`peakCommittedMB` (that is only this JVM's own commit, ~130 MB, and stays flat)
-and **not** `peakPhysUsedMB` (inside the sandbox the process sees the shared
-host, total 3070 MB, so it includes other tenants).
-
-Reading the counter needs JNA through `kernel32!GetEnvironmentVariableW`: the
-sandbox serves these values as write-only "environment variables" that do not
-appear in an enumeration and are recomputed on every lookup, so
-`System.getenv` — which reads the JVM's start-up snapshot — never sees them.
+That counter is the Consumption plan's billing caliber: private memory of the
+process *and its children*, rounded up to the next 128 MB and capped at 1536 MB.
+It is read through JNA (`kernel32!GetEnvironmentVariableW`) because the sandbox
+serves it as a recompute-on-lookup pseudo-variable that `System.getenv` — which
+reads the JVM's start-up snapshot — never sees.
 
 #### `azure_phase_diag.csv`
 
@@ -388,11 +369,10 @@ grouped by what each one measures:
 unlimited. On this plan the Job Object reports `limit_MB` = 1536 and
 `priv_peak_MB` tracks `used_peak_MB` closely.
 
-The `invoke_start_utc` column exists to **join the run to Azure Monitor's
-platform metrics**: export `AverageMemoryWorkingSet` (`Microsoft.Web/sites`,
-unit bytes, PT1M) for the same window and match it minute by minute. The join
-needs roughly one invocation per minute per thread level, which is what
-`-DazurePhaseSeconds=300` (the default) is for.
+`invoke_start_utc` exists to join the run to Azure Monitor's exported
+`AverageMemoryWorkingSet` (`Microsoft.Web/sites`, bytes, PT1M) metric for the same
+window, minute by minute; the join needs about one invocation per minute per thread
+level, which is what `-DazurePhaseSeconds` (default 300) is for.
 
 ### Examples
 
@@ -483,92 +463,30 @@ coldstartidle mode (Tencent / Ali):
   restore the previous max-instance setting
 ```
 
-Changing the memory tier is what forces a new container on Tencent / Ali / AWS, so
-the *first* invocation after a switch tends to be cold — but not always: the platform
-may keep serving from the pre-switch container, so the cold call can land on run 1 or
-later. `Run_ID 0` is recorded for exactly that reason, and the cold/warm label is
-derived from instance identity, never from position in the block.
-
-### Where the cold-start number comes from
-
-`Total_Time_ms` alone cannot answer this. It is the client's wall clock around the
-invoke, so it stacks client SDK setup and network RTT on top of init and execution —
-and on a long-haul link that first term moves by tens of seconds between calls
-(Ali 256 MB: 21.8 s cold vs 44.4 s warm *on the same container*), which is how the
-naive `Total_cold − Total_warm` produced negative cold starts.
-
-Two ways to get init out of that, both recorded per row:
-
-- **`Init_Probe_ms`** — the handler reads `ManagementFactory` uptime as the invocation
-  enters. In-instance, so client and network time are structurally absent. It is the
-  container's *age* at handler entry, and equals the cold start only when the container
-  was built for that call — not on every row, because a platform can build the new
-  tier's container in the background after a memory switch. On AWS, which does replace
-  the container at the switch, it is a lower bound on the platform's `Init Duration`
-  (JVM start happens after the platform's own bootstrap). On Tencent the first call to
-  reach the new tier can report an age reaching back *before* the request: the
-  2026-09-24 run had a row at `Init_Probe_ms` 29325 against `Total_Time_ms` 20736,
-  which a container created by that call cannot do. So use it as a **validity flag**,
-  not a value: `probe > Total − Execution` means the row is a **false cold** and has to
-  be dropped, and the probe is not a Tencent cold-start figure at all. It also catches
-  a container warmed by the pre-measurement audit call, which is new to the seen-set
-  but reports minutes rather than seconds. Needs a rebuild + redeploy; older packages
-  yield `NA`.
-- **`(Total − Execution)`** on the cold row minus the median of the same on that same
-  container's warm rows. Subtracting the in-handler time leaves only
-  client + init + response, and taking the baseline from the *same* container holds
-  the client/network term constant. This needs no redeploy and works on data already
-  collected.
-
-Both cross-check each other, and the two independent containers each tier gets from
-the adjacent-pair sweep cross-check the tier. What to reject: a non-positive value, a
-tier that breaks monotonicity in memory (init is CPU-bound, so more memory must not
-be slower), or a tier whose two estimates disagree by more than a few percent — that
-last one is Ali's signature, and it means the client was too far from the region.
-
 ### Why a second cold-start trigger exists (`coldstartidle`)
 
-The trigger above is a **memory switch** — and a memory switch is something the platform
-can see. Tencent uses that warning to build the replacement container in the background
-while the block's baseline call is still running, so the call we label cold lands on a
-container that already exists and the number is only the part of the rebuild the platform
-left for the caller. On 2026-09-24 that residual ran 1.5–2.7× below the idle-reclaim
-trigger on the same tiers (256 MB: 3433 ms vs 5165 ms; 512 MB: 1877 ms vs 4226 ms).
+`coldstart` triggers a cold start with a **memory switch**, and a memory switch is
+something the platform can see — Tencent uses that warning to build the replacement
+container in the background, so the call labelled cold lands on a container that already
+exists and the number is only the residual the platform left for the caller.
+`coldstartidle` instead uses the platform's own **idle reclaim**: set the tier once, warm
+one instance, then stop calling for `-DidleMinutes` (default 20). Nothing during the wait
+is a demand signal, so there is no reason to pre-build, and the first call afterwards is
+the one that has to build the container. That call is the sample (`Run_ID 1`); runs 2..4
+of the same container are the warm baseline. Columns, gates and estimator are unchanged —
+same 7-column format as `cold_start.csv`, different file.
 
-`coldstartidle` makes the trigger the platform's own **idle reclaim**: set the tier once,
-warm one instance, then stop calling. Nothing during the wait is a demand signal, so
-there is no reason to pre-build, and the first call afterwards is the one that has to
-build the container. That call is the sample (`Run_ID 1`); runs 2..4 of the same container
-are the warm baseline. Columns, gates and estimator are unchanged — same 7-column format
-as `cold_start.csv`, different file.
-
-Which platform uses which:
-
-| platform | method | why |
-|---|---|---|
-| Tencent | `coldstartidle` | pre-builds the replacement, so the switch method measures a residual |
-| AWS | `coldstart` | replaces the container at the switch; probe and client wall clock agree (256 MB: 100667 vs 102706), so the switch method is already correct |
-| Ali | `coldstartidle` | same pre-build exposure as Tencent; needs the console instance cap first |
-| Azure | `coldstart Azure` | no memory API; its own path already waits for reclaim |
+| platform | method |
+|---|---|
+| Tencent | `coldstartidle` |
+| Ali | `coldstartidle` (needs the console instance cap first) |
+| AWS | `coldstart` |
+| Azure | `coldstart Azure` |
 
 `runIdleColdStartBenchmark` removes AWS and Azure from the platform set and says why in a
 comment, so passing them on the command line is a no-op rather than a silent wrong run.
-
-Cost is dominated by the wait, not the calls: one cold sample per block, and one
-`idleMinutes` wait per block, so a full five-tier ladder is ~100 minutes per platform. If
-a tier's instance was not reclaimed in time, the sample call comes back warm by the
-seen-set rule — the correct label — and the analysis drops the block rather than averaging
-it in. Two caveats worth knowing before reading the numbers:
-
-- **The in-instance probe cannot see the platform's bootstrap.** Image pull and JVM
-  launch happen before `ManagementFactory` starts counting, so `Init_Probe_ms` is a gate
-  here, never a value. What the mode produces is the *caller-visible* cold latency
-  (container build + package pull + JVM start + network), which is comparable across
-  providers but is not the platform's own `Init Duration`.
-- **Nothing in the CSV records the memory tier the instance actually ran at.** A memory
-  change may not have propagated when the warm-up call goes out (observed: Tencent's
-  512 MB warm-up landed back on the 256 MB container), so tier validity can only be
-  inferred from execution time afterwards.
+Cost is dominated by the wait, not the calls: one idle wait per tier, so a full five-tier
+ladder is ~100 minutes per platform.
 
 ### Max-Instance (paper §4.5)
 
@@ -581,23 +499,6 @@ The cap is applied automatically before the sweep and reverted afterwards:
 | Tencent | `PutReservedConcurrencyConfig` | the quota is **memory-sized**, so max instances = quota ÷ function memory; the code moves the quota with every memory switch to keep the count at 1. A switch **down** is rejected with `concurrency exceeded reserved quota` until the previous tier's instance is reclaimed, so calls are retried (10 s apart, up to 6 min) until one gets through |
 | AWS | `PutFunctionConcurrency` / `DeleteFunctionConcurrency` | reserved concurrency is a plain instance count, so it stays at 1 |
 | Ali | none | the `fc20230330` SDK in `pom.xml` has no scaling-config API; set **弹性实例配额 = 1** by hand (函数计算 → 函数 → 弹性配置 → 函数配额) or the run violates §4.5. The code prints a reminder and still verifies the memory tier through `getFunction` |
-
-Two independent signals are recorded per row and they are **not** interchangeable:
-
-- `Is_Cold` — did the call land on an instance ID this platform has not returned
-  before in this run? (A seen-set, not a comparison with the previous call: with two
-  alternating containers, "different from last time" mislabels the second sighting of
-  a container as cold.) Failed calls write `NA`, never `false`, so a group-by on this
-  column cannot silently absorb them.
-- `Total_Time_ms` — client-side wall clock. This is the one that captures container
-  boot, because `Execution_Time_ms` is measured *inside* the handler body and starts
-  after the runtime is already up. Subtract the warm baseline from it to get the real
-  cold-start cost.
-
-Note that the timed window includes the client-side setup inside each platform's
-`invoke()` (it re-reads the Properties file and builds a fresh SDK client per call),
-which adds a roughly constant offset to both cold and warm rows; it largely cancels
-in the subtraction but it is not zero-variance.
 
 ### FIV: two Fibonacci algorithms
 
@@ -619,14 +520,9 @@ The two runs are written to **separate files on purpose**. `FIV_iter.csv` is an
 order of magnitude slower per call and would silently change what `FIV.csv`
 means if it were appended there.
 
-The variant exists because the paper never states which algorithm it used. Its
-only description is "calculate the first 800,000 terms of the Fibonacci
-sequence" (§5.6, and the Figure 6 caption); there is no code, pseudocode or
-algorithm name. The plain reading of that phrase suggests the O(n) iteration, and
-the *magnitude* of the paper's own numbers supports it — AWS at 2048 MB (~1 vCPU)
-is 11.4 s, the order of an O(n) pass, while fast doubling lands 10–100× below
-that. That is an inference from magnitudes, not a statement in the paper, so the
-switch exists to measure both rather than argue about it.
+The variant exists because the paper never states which algorithm it used — its only
+description is "calculate the first 800,000 terms of the Fibonacci sequence" (§5.6) —
+so the switch exists to measure both rather than argue about it.
 
 ### Parameter Matrix
 
@@ -690,16 +586,10 @@ described in [Azure is measured differently](#azure-is-measured-differently)
 
 **cold_start.csv** (Tencent / Ali / AWS): `CSP,Memory_MB,Is_Cold,Run_ID,Init_Probe_ms,Execution_Time_ms,Instance_ID,Total_Time_ms`
 - Is_Cold = true if the instance ID had not been seen before in this run; `NA` on failure
-- Init_Probe_ms = the handler's own `ManagementFactory` uptime as the invocation entered,
-  in ms — sampled **inside the instance**, so it carries no client or network time. It is
-  the container's age at handler entry, which equals the cold start only when the container
-  was built for that call. Not a value on every row: a platform may build the new tier's
-  container in the background after a memory switch, so the first call to land on it can
-  report an age reaching back before the request (2026-09-24: Tencent 29325 ms against a
-  Total of 20736 ms). Read it as a validity flag — `probe > Total − Execution` is a false
-  cold. On AWS it is a lower bound on `Init Duration` (JVM start comes after that bootstrap);
-  on Tencent it is not a cold-start figure at all. `NA` if the deployed package predates the
-  probe (rebuild + redeploy to get it)
+- Init_Probe_ms = the handler's own `ManagementFactory` uptime at handler entry, in ms,
+  sampled **inside the instance** so it carries no client or network time. Treat it as a
+  validity flag rather than a value: `probe > Total − Execution` means a false cold. `NA`
+  if the deployed package predates the probe (rebuild + redeploy to get it)
 - Run_ID 0 = the first call after a memory switch, kept as the block's baseline
 - Total_Time_ms = client-side wall clock, the only column that includes client SDK and
   network time on top of boot + execution
