@@ -10,6 +10,7 @@ import com.amazonaws.services.s3.model.S3Object;
 import com.fchen_group.TPDSInScf.Core.ChallengeData;
 import com.fchen_group.TPDSInScf.Core.IntegrityAuditing;
 import com.fchen_group.TPDSInScf.Core.ProofData;
+import com.fchen_group.TPDSInScf.Utils.FibIter;
 import com.fchen_group.TPDSInScf.Utils.ResponseClass;
 import com.fchen_group.TPDSInScf.Utils.TenRequestClass;
 
@@ -24,12 +25,17 @@ import java.util.concurrent.TimeUnit;
  */
 public class AwsHandle implements RequestStreamHandler {
 
+    /** Cold-start probe, refreshed at every invocation entry; see ResponseClass.initMs. */
+    static long PROBE_INIT_MS = -1;
+
     /**
      * AWS Lambda entry point. Reads JSON request from input stream,
      * writes JSON response to output stream.
      */
     @Override
     public void handleRequest(InputStream input, OutputStream output, Context context) throws IOException {
+        PROBE_INIT_MS = java.lang.management.ManagementFactory.getRuntimeMXBean().getUptime();
+
         // Read input stream
         java.util.Scanner scanner = new java.util.Scanner(input, "UTF-8").useDelimiter("\\A");
         String inputStr = scanner.hasNext() ? scanner.next() : "";
@@ -113,6 +119,7 @@ public class AwsHandle implements RequestStreamHandler {
         ResponseClass responseClass = new ResponseClass(proofData);
         responseClass.download_time = end_time_download - start_time_download;
         responseClass.proofTime = end_time_proof - start_time_proof;
+        responseClass.initMs = PROBE_INIT_MS;
         responseClass.instanceId = context.getLogStreamName();
 
         String output = JSON.toJSONString(responseClass);
@@ -160,15 +167,17 @@ public class AwsHandle implements RequestStreamHandler {
 
     String handleFib(TenRequestClass request) {
         int n = request.fibN > 0 ? request.fibN : 800000;
+        boolean iter = "iter".equals(request.fibAlgo);
         long start = System.nanoTime();
-        String result = fib(n);
+        String result = iter ? FibIter.fib(n) : fib(n);
         long elapsed = System.nanoTime() - start;
         ResponseClass resp = new ResponseClass(null);
         resp.download_time = 0L;
         resp.proofTime = elapsed;
         resp.proofData = null;
+        resp.initMs = PROBE_INIT_MS;
         try { resp.instanceId = java.net.InetAddress.getLocalHost().getHostName(); } catch (Exception ignored) {}
-        System.out.println("fib(" + n + ") time=" + elapsed + " digits=" + result.length());
+        System.out.println("fib(" + n + ") algo=" + (iter ? "iter" : "fast") + " time=" + elapsed + " digits=" + result.length());
         return JSON.toJSONString(resp);
     }
 }

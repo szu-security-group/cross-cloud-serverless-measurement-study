@@ -11,6 +11,7 @@ import com.fchen_group.TPDSInScf.Core.ChallengeData;
 import com.fchen_group.TPDSInScf.Core.IntegrityAuditing;
 import com.fchen_group.TPDSInScf.Core.ProofData;
 import com.fchen_group.TPDSInScf.Utils.AliCloudAPI;
+import com.fchen_group.TPDSInScf.Utils.FibIter;
 import com.fchen_group.TPDSInScf.Utils.ResponseClass;
 import com.fchen_group.TPDSInScf.Utils.TenRequestClass;
 
@@ -28,7 +29,12 @@ import java.util.concurrent.TimeUnit;
  */
 public class AliHandle {
 
+    /** Cold-start probe, refreshed at every invocation entry; see ResponseClass.initMs. */
+    static long PROBE_INIT_MS = -1;
+
     public String handleRequest(TenRequestClass request) {
+        PROBE_INIT_MS = java.lang.management.ManagementFactory.getRuntimeMXBean().getUptime();
+
         if ("fib".equals(request.testType)) return handleFib(request);
 
         ChallengeData challengeData = request.challengeData;
@@ -100,6 +106,7 @@ public class AliHandle {
         ResponseClass responseClass = new ResponseClass(proofData);
         responseClass.download_time = end_time_download - start_time_download;
         responseClass.proofTime = end_time_proof - start_time_proof;
+        responseClass.initMs = PROBE_INIT_MS;
         try { responseClass.instanceId = java.net.InetAddress.getLocalHost().getHostName(); } catch (Exception ignored) {}
 
         String output = JSON.toJSONString(responseClass);
@@ -251,15 +258,17 @@ public class AliHandle {
 
     String handleFib(TenRequestClass request) {
         int n = request.fibN > 0 ? request.fibN : 800000;
+        boolean iter = "iter".equals(request.fibAlgo);
         long start = System.nanoTime();
-        String result = fib(n);
+        String result = iter ? FibIter.fib(n) : fib(n);
         long elapsed = System.nanoTime() - start;
         ResponseClass resp = new ResponseClass(null);
         resp.download_time = 0L;
         resp.proofTime = elapsed;
         resp.proofData = null;
+        resp.initMs = PROBE_INIT_MS;
         try { resp.instanceId = java.net.InetAddress.getLocalHost().getHostName(); } catch (Exception ignored) {}
-        System.out.println("fib(" + n + ") time=" + elapsed + " digits=" + result.length());
+        System.out.println("fib(" + n + ") algo=" + (iter ? "iter" : "fast") + " time=" + elapsed + " digits=" + result.length());
         return JSON.toJSONString(resp);
     }
 
@@ -306,6 +315,7 @@ public class AliHandle {
         ResponseClass resp = new ResponseClass(proofData);
         resp.download_time = endDownload - startDownload;
         resp.proofTime = endProof - startProof;
+        resp.initMs = PROBE_INIT_MS;
         try { resp.instanceId = java.net.InetAddress.getLocalHost().getHostName(); } catch (Exception ignored) {}
         return JSON.toJSONString(resp);
     }

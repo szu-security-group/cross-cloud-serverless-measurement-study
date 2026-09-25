@@ -6,13 +6,21 @@
 
       test type: audit | fib | s3 | azure
       enabled:  true | false
+
+      Note: the coldstart test is NOT configured here. It always uses the built-in
+      memory tiers (128,256,512,1024,2048, paired adjacently) and the hard-coded
+      output filenames cold_start.csv / azure_cold_start.csv.
     -->
 
-    <!-- Audit test: native cloud storage + integrity auditing -->
+    <!-- Audit test: native cloud storage + integrity auditing.
+         memorySizes must match the tiers actually present in the paper's data
+         (待复现数据/云审计各自.csv), which differ per platform: Tencent uses its
+         native ladder 128,256,512,1408,2176,2944 (900 rows), Ali uses
+         128,256,512,1024,2048 (750), AWS uses 256,512,1024,2048 (600). -->
     <test type="audit" enabled="true">
-        <csvFile>云审计各自.csv</csvFile>
-        <platforms>Tencent,Ali,AWS</platforms>
-        <memorySizes>128,256,512,1024,2048</memorySizes>
+        <csvFile>云审计_腾讯.csv</csvFile>
+        <platforms>Tencent</platforms>
+        <memorySizes>128,256,512,1408,2176,2944</memorySizes>
         <threadCounts>1,2,4,8,16</threadCounts>
         <repetitions>30</repetitions>
     </test>

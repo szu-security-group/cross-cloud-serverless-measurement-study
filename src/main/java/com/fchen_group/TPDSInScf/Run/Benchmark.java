@@ -44,6 +44,12 @@ public class Benchmark {
     static final int BLOCK_SHARDS = 255;
     static final int CHALLENGE_LEN = 460;
 
+    // -DfibAlgo=iter switches the FIV payload to FibIter (the paper's O(n) task) and routes
+    // output to FIV_iter.csv, so the two algorithms never land in the same file. Default "fast"
+    // leaves the existing fast-doubling run byte-for-byte unchanged.
+    static final String FIB_ALGO = System.getProperty("fibAlgo", "fast");
+    static final boolean FIB_ITER = "iter".equals(FIB_ALGO);
+
     static final String PROJECT_DIR = System.getProperty("user.dir");
     static final String CONFIG_DIR = PROJECT_DIR + "\\Properties";
     static final String JAR_PATH = PROJECT_DIR + "\\target\\TPDSInSCF-1.0-SNAPSHOT_Benchmark-jar-with-dependencies.jar";
@@ -58,6 +64,8 @@ public class Benchmark {
     static boolean skipBuild = false;
     static boolean skipDeploy = false;
     static boolean slimDeploy = false;
+    static long idleMinutes = 20L;         // -DidleMinutes; testMode shortens it to 2
+    static int[] idleMemorySizes = null;   // -DidleTiers=128,512,2048; null = DEFAULT_MEMORY_SIZES
     static final Map<Platform, File> slimJarCache = new EnumMap<>(Platform.class);
 
     // ==================== Main Entry ====================
@@ -67,6 +75,16 @@ public class Benchmark {
         skipBuild = "true".equals(System.getProperty("skipBuild"));
         skipDeploy = "true".equals(System.getProperty("skipDeploy"));
         slimDeploy = "true".equals(System.getProperty("slimDeploy"));
+        // Same convention as the Azure wait: testMode cuts the idle wait so a smoke run does
+        // not sit for 20 minutes per tier. Two minutes is far below any reclaim threshold, so
+        // a testMode run yields no cold rows by design — it only proves the wiring works.
+        idleMinutes = Long.getLong("idleMinutes", testMode ? 2L : 20L);
+        String tiersProp = System.getProperty("idleTiers");
+        if (tiersProp != null && !tiersProp.trim().isEmpty()) {
+            String[] parts = tiersProp.split(",");
+            idleMemorySizes = new int[parts.length];
+            for (int i = 0; i < parts.length; i++) idleMemorySizes[i] = Integer.parseInt(parts[i].trim());
+        }
 
         // Load XML config (optional)
         Map<String, XmlConfigParser.TestConfig> xmlConfig = loadXmlConfig();
@@ -77,7 +95,7 @@ public class Benchmark {
 
         if (args.length > 0) {
             String first = args[0].toLowerCase();
-            if (first.equals("audit") || first.equals("fib") || first.equals("s3") || first.equals("azure") || first.equals("all") || first.equals("deploy") || first.equals("coldstart")) {
+            if (first.equals("audit") || first.equals("fib") || first.equals("s3") || first.equals("azure") || first.equals("all") || first.equals("deploy") || first.equals("coldstart") || first.equals("coldstartidle")) {
                 testTypeStr = first;
                 if (args.length > 1) cliPlatforms = parsePlatforms(Arrays.copyOfRange(args, 1, args.length));
             } else {
@@ -127,6 +145,7 @@ public class Benchmark {
             case "azure": runAzureBenchmark(cfg);               break;
             case "deploy":    deployOnly(cliPlatforms);            break;
             case "coldstart": runColdStartBenchmark(cfg, cliPlatforms); break;
+            case "coldstartidle": runIdleColdStartBenchmark(cfg, cliPlatforms); break;
         }
     }
 
@@ -345,12 +364,14 @@ public class Benchmark {
         Set<Platform> platforms = resolvePlatforms(cfg, cliPlatforms);
         platforms.remove(Platform.AZURE); // Azure excluded from unified FIV
 
-        String csvPath = PROJECT_DIR + "\\" + (cfg != null && cfg.csvFile != null ? cfg.csvFile : "FIV.csv");
+        String csvFile = cfg != null && cfg.csvFile != null ? cfg.csvFile : "FIV.csv";
+        if (FIB_ITER) csvFile = "FIV_iter.csv";
+        String csvPath = PROJECT_DIR + "\\" + csvFile;
         int[] memSizes = resolveMemories(cfg, DEFAULT_MEMORY_SIZES);
         int reps = resolveReps(cfg, DEFAULT_REPETITIONS);
         int fibN = cfg != null ? cfg.fibN : 40;
 
-        System.out.println("\n========== FIB Benchmark (fib(" + fibN + ")) ==========");
+        System.out.println("\n========== FIB Benchmark (fib(" + fibN + "), algo=" + FIB_ALGO + ") ==========");
         writeCsvHeader(csvPath, "CSP,Memory_MB,Run_ID,Execution_Time_ms");
 
         for (Platform p : platforms) {
@@ -496,8 +517,12 @@ public class Benchmark {
 
     static void runAzureBenchmark(XmlConfigParser.TestConfig cfg) throws Exception {
         String csvPath = PROJECT_DIR + "\\" + (cfg != null && cfg.csvFile != null ? cfg.csvFile : "azure_benchmark_data.csv");
+        String diagPath = PROJECT_DIR + "\\azure_phase_diag.csv";
         int[] threadCounts = resolveThreads(cfg, DEFAULT_THREAD_COUNTS);
         int reps = resolveReps(cfg, 10);
+        // Spread each thread phase over this many seconds so Azure Monitor's PT1M platform
+        // metrics resolve every thread level. -DazurePhaseSeconds=0 restores back-to-back pacing.
+        int phaseSec = Integer.parseInt(System.getProperty("azurePhaseSeconds", "300"));
 
         System.out.println("\n========== Azure Benchmark ==========");
         swapProperties(Platform.AZURE);
@@ -509,6 +534,12 @@ public class Benchmark {
         ChallengeData cd = ia.audit(CHALLENGE_LEN);
 
         writeCsvHeader(csvPath, "threads,test_id,exec_time,mem_usage");
+        writeCsvHeader(diagPath, "thread,test_id,invoke_start_utc,invoke_start_epoch_ms,exec_time_s,"
+                + "total_phys_MB,peak_phys_used_MB,peak_heap_used_MB,peak_nonheap_used_MB,"
+                + "peak_direct_used_MB,peak_committed_MB,peak_threads,samples,"
+                + "mem_source,mem_source_detail,limit_MB,used_start_MB,used_peak_MB,"
+                + "used_last_MB,proc_peak_working_set_MB,proc_peak_private_MB,proc_mem_api,"
+                + "priv_source,priv_start_MB,priv_peak_MB,priv_last_MB,env_mem_limit_MB");
 
         for (int thread : threadCounts) {
             System.out.println("  Thread=" + thread);
@@ -518,26 +549,85 @@ public class Benchmark {
             try { invokeFunction(Platform.AZURE, payload); Thread.sleep(3000); }
             catch (Exception e) { System.err.println("  Warm-up failed: " + e.getMessage()); }
 
+            long phaseStart = System.currentTimeMillis();
+            System.out.println("  PHASE_START thread=" + thread + " utc=" + utcIso(phaseStart));
+
             for (int run = 1; run <= reps; run++) {
                 double execTimeSec = -1;
+                ResponseClass resp = null;
+                long invokeStart = System.currentTimeMillis();
                 try {
                     String resultJson = invokeFunction(Platform.AZURE, payload);
-                    ResponseClass resp = JSON.parseObject(resultJson, ResponseClass.class);
+                    resp = JSON.parseObject(resultJson, ResponseClass.class);
                     execTimeSec = (resp.download_time + resp.proofTime) / 1_000_000_000.0;
 
                     if (!ia.verify(cd, resp.proofData)) {
                         System.err.println("    VERIFY FAILED: Azure thread=" + thread + " run=" + run);
                     }
-                    System.out.println("    run " + run + ": " + String.format("%.1f", execTimeSec) + "s");
+                    System.out.println("    run " + run + ": " + String.format("%.1f", execTimeSec) + "s exec"
+                            + " | comm=" + nz(resp.peakCommittedMB) + "MB"
+                            + " heap=" + nz(resp.peakHeapUsedMB) + " nonheap=" + nz(resp.peakNonHeapUsedMB)
+                            + " direct=" + nz(resp.peakDirectUsedMB)
+                            + " thr=" + nz(resp.peakThreads) + " n=" + nz(resp.samples)
+                            + " | " + nz(resp.memSource) + " limit=" + nz(resp.limitMB)
+                            + " used=" + nz(resp.usedPeakMB) + "MB"
+                            + " priv=" + nz(resp.privPeakMB) + "MB"
+                            + " | hostPhysUsed=" + nz(resp.peakPhysUsedMB) + "MB (host total=" + nz(resp.totalPhysMB) + ")");
                 } catch (Exception e) {
                     System.err.println("    Invoke failed: run=" + run + " - " + e.getMessage());
                 }
 
-                String row = thread + "," + run + "," + (execTimeSec >= 0 ? String.format("%.1f", execTimeSec) : "Failed") + ",";
-                appendCsvRow(csvPath, row);
-                if (run < reps) Thread.sleep(500);
+                String execCol = execTimeSec >= 0 ? String.format("%.1f", execTimeSec) : "Failed";
+                // mem_usage = the instance's peak private commit over this invocation, read from
+                // the platform's own counter (WEBSITE_COUNTERS_APP.privateBytes) — the quantity
+                // Azure Consumption bills on. NOT peakCommittedMB: that is only our JVM's own
+                // commit and stays flat under load. NOT peakPhysUsedMB either: inside the
+                // sandbox /proc/meminfo reports the shared host (total 3070 MB), so total-free
+                // is other tenants' usage as well.
+                appendCsvRow(csvPath, thread + "," + run + "," + execCol
+                        + "," + nz(resp == null ? null : resp.privPeakMB));
+                appendCsvRow(diagPath, thread + "," + run + "," + utcIso(invokeStart) + "," + invokeStart
+                        + "," + execCol
+                        + "," + nz(resp == null ? null : resp.totalPhysMB)
+                        + "," + nz(resp == null ? null : resp.peakPhysUsedMB)
+                        + "," + nz(resp == null ? null : resp.peakHeapUsedMB)
+                        + "," + nz(resp == null ? null : resp.peakNonHeapUsedMB)
+                        + "," + nz(resp == null ? null : resp.peakDirectUsedMB)
+                        + "," + nz(resp == null ? null : resp.peakCommittedMB)
+                        + "," + nz(resp == null ? null : resp.peakThreads)
+                        + "," + nz(resp == null ? null : resp.samples)
+                        + "," + nz(resp == null ? null : resp.memSource)
+                        + "," + nz(resp == null ? null : resp.memSourceDetail)
+                        + "," + nz(resp == null ? null : resp.limitMB)
+                        + "," + nz(resp == null ? null : resp.usedStartMB)
+                        + "," + nz(resp == null ? null : resp.usedPeakMB)
+                        + "," + nz(resp == null ? null : resp.usedLastMB)
+                        + "," + nz(resp == null ? null : resp.procPeakWorkingSetMB)
+                        + "," + nz(resp == null ? null : resp.procPeakPrivateMB)
+                        + "," + nz(resp == null ? null : resp.procMemApi)
+                        + "," + nz(resp == null ? null : resp.privSource)
+                        + "," + nz(resp == null ? null : resp.privStartMB)
+                        + "," + nz(resp == null ? null : resp.privPeakMB)
+                        + "," + nz(resp == null ? null : resp.privLastMB)
+                        + "," + nz(resp == null ? null : resp.envMemLimitMB));
+
+                // Pace: pin invocation N to an even slice of the phase.
+                long target = phaseStart + (long) phaseSec * 1000 * run / reps;
+                long sleep = target - System.currentTimeMillis();
+                if (sleep > 0) Thread.sleep(sleep);
             }
+
+            System.out.println("  PHASE_END   thread=" + thread + " utc=" + utcIso(System.currentTimeMillis()));
         }
+    }
+
+    static String utcIso(long epochMs) {
+        return java.time.Instant.ofEpochMilli(epochMs).toString();
+    }
+
+    /** CSV cell for a value that may be missing (invocation failed or sampler reported nothing). */
+    static String nz(Object v) {
+        return v == null ? "Failed" : v.toString();
     }
 
     // ==================== Properties Management ====================
@@ -1068,6 +1158,7 @@ public class Benchmark {
         );
         req.testType = "fib";
         req.fibN = fibN;
+        req.fibAlgo = FIB_ALGO;
         return JSON.toJSONString(req);
     }
 
@@ -1138,10 +1229,347 @@ public class Benchmark {
 
     // ================================================================
     //  COLD START benchmark — cold_start.csv
-    //  Alternates memory sizes to force new container creation.
-    //  Verifies instanceId change to confirm cold start (§4.5 method).
-    //  CSP,Memory_MB,Is_Cold,Run_ID,Execution_Time_ms,Instance_ID
+    //  Alternates memory sizes to force new container creation, and checks
+    //  whether the instance id is one this run has never seen (§4.5 method).
+    //
+    //  §4.5 also sets the max active instance count to 1. Without that cap a
+    //  platform may keep two containers alive and route a call to either one:
+    //  the 2026-09-24 run recorded Tencent's 256 MB and 128 MB blocks as A B A,
+    //  so all three rows came out cold and those blocks had no warm baseline.
+    //  AWS and Tencent expose the cap through their SDKs; Ali's SDK version has
+    //  no scaling-config API, so its cap has to be set by hand in the console:
+    //  函数计算 → 函数 → 弹性配置 → 函数配额 → 弹性实例配额 = 1
+    //
+    //  Run_ID 0 is the call made right after a memory switch. It is recorded so the
+    //  block has an explicit baseline, and it also absorbs a first call that is still
+    //  routed to the pre-switch container. Failed calls write NA for Is_Cold, never
+    //  false, so a group-by on Is_Cold cannot silently absorb them.
+    //
+    //  Init_Probe_ms is the handler's own reading of ManagementFactory uptime when the
+    //  invocation entered — ms from JVM start, sampled in-instance, so it carries none
+    //  of the client or network time that pollutes Total_Time_ms.
+    //
+    //  It is the container's age at handler entry, and equals the init cost only when the
+    //  container was built for this call. That is not guaranteed: a platform may build the
+    //  new tier's container in the background after a memory switch, so the first call to
+    //  land on it reports an age reaching back before the request. The 2026-09-24 run saw
+    //  Tencent's 2048 MB block report 29325 ms against a Total of 20736 ms, which a
+    //  container created by that call cannot do. So read it as a validity flag, not a value:
+    //  probe > Total - Execution means the row is a false cold, and on Tencent the probe is
+    //  not a cold-start figure at all. On AWS, which does replace the container at the
+    //  switch, it is a lower bound on the platform's own Init Duration — JVM start is past
+    //  that bootstrap, so the platform's number is the larger one.
+    //
+    //  CSP,Memory_MB,Is_Cold,Run_ID,Init_Probe_ms,Execution_Time_ms,Instance_ID,Total_Time_ms
     // ================================================================
+
+    /** A platform's max-instance setting, read before the run so it can be put back after. */
+    static final class MaxInstanceSetting {
+        final Platform platform;
+        final boolean controllable;   // false = no API in this SDK version (Ali)
+        final Long previous;          // null = the function had no cap configured
+
+        MaxInstanceSetting(Platform platform, boolean controllable, Long previous) {
+            this.platform = platform;
+            this.controllable = controllable;
+            this.previous = previous;
+        }
+    }
+
+    /**
+     * Pin the function to a single live instance and remember what was there before.
+     * Tencent's cap is a memory quota rather than an instance count — maxInstances =
+     * reservedQuota / memoryMB — so it has to follow every memory switch; pinning it to the
+     * tier the function is on right now keeps the count at 1 in the meantime.
+     */
+    static MaxInstanceSetting pinToOneInstance(Platform p) {
+        if (p == Platform.ALI) {
+            System.out.println("  NOTE: Ali has no max-instance API in this SDK version. Set the"
+                + " elastic-instance quota to 1 by hand in the console"
+                + " (Function Compute -> Function -> Elastic Config -> Function Quota),"
+                + " or this run does not follow section 4.5.");
+            return new MaxInstanceSetting(p, false, null);
+        }
+        Long previous = null;
+        try {
+            previous = readReservedConcurrency(p);
+        } catch (Exception e) {
+            System.out.println("  (could not read the current reservation: " + e.getMessage() + ")");
+        }
+        int current = -1;
+        try {
+            current = readConfiguredMemory(p);
+        } catch (Exception ignored) { }
+        long quota = p == Platform.TENCENT ? (current > 0 ? current : DEFAULT_MEMORY_SIZES[0]) : 1;
+        try {
+            writeReservedConcurrency(p, quota);
+            System.out.println("  Max instances pinned to 1"
+                + (p == Platform.TENCENT ? " (reserved quota " + quota + " MB, follows the memory tier)" : "")
+                + "; was " + (previous == null ? "unset" : previous));
+        } catch (Exception e) {
+            System.out.println("  !! Could not pin max instances to 1: " + e.getMessage());
+        }
+        return new MaxInstanceSetting(p, true, previous);
+    }
+
+    /** Put the function's reservation back the way we found it. */
+    static void restoreInstanceSetting(MaxInstanceSetting s) {
+        if (s == null || !s.controllable) return;
+        try {
+            if (s.previous == null) deleteReservedConcurrency(s.platform);
+            else writeReservedConcurrency(s.platform, s.previous);
+            System.out.println("  Max-instance setting restored ("
+                + (s.previous == null ? "unset" : s.previous) + ")");
+        } catch (Exception e) {
+            System.out.println("  !! Could not restore the max-instance setting for " + s.platform
+                + ": " + e.getMessage());
+        }
+    }
+
+    /** The reservation: Tencent = memory quota in MB, AWS = instance count. Null if unset. */
+    static Long readReservedConcurrency(Platform p) throws Exception {
+        switch (p) {
+            case TENCENT: {
+                com.tencentcloudapi.scf.v20180416.models.GetReservedConcurrencyConfigRequest req =
+                    new com.tencentcloudapi.scf.v20180416.models.GetReservedConcurrencyConfigRequest();
+                req.setFunctionName(props.getProperty("functionName"));
+                req.setNamespace("default");
+                Long mem = scfClient().GetReservedConcurrencyConfig(req).getReservedMem();
+                return (mem == null || mem <= 0) ? null : mem;
+            }
+            case AWS: {
+                Integer n = awsLambdaClient().getFunctionConcurrency(
+                        new com.amazonaws.services.lambda.model.GetFunctionConcurrencyRequest()
+                            .withFunctionName(props.getProperty("functionName")))
+                    .getReservedConcurrentExecutions();
+                return n == null ? null : n.longValue();
+            }
+            default:
+                return null;
+        }
+    }
+
+    static void writeReservedConcurrency(Platform p, long value) throws Exception {
+        switch (p) {
+            case TENCENT: {
+                com.tencentcloudapi.scf.v20180416.models.PutReservedConcurrencyConfigRequest req =
+                    new com.tencentcloudapi.scf.v20180416.models.PutReservedConcurrencyConfigRequest();
+                req.setFunctionName(props.getProperty("functionName"));
+                req.setNamespace("default");
+                req.setReservedConcurrencyMem(value);
+                scfClient().PutReservedConcurrencyConfig(req);
+                break;
+            }
+            case AWS: {
+                awsLambdaClient().putFunctionConcurrency(
+                    new com.amazonaws.services.lambda.model.PutFunctionConcurrencyRequest()
+                        .withFunctionName(props.getProperty("functionName"))
+                        .withReservedConcurrentExecutions((int) value));
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    static void deleteReservedConcurrency(Platform p) throws Exception {
+        switch (p) {
+            case TENCENT: {
+                com.tencentcloudapi.scf.v20180416.models.DeleteReservedConcurrencyConfigRequest req =
+                    new com.tencentcloudapi.scf.v20180416.models.DeleteReservedConcurrencyConfigRequest();
+                req.setFunctionName(props.getProperty("functionName"));
+                req.setNamespace("default");
+                scfClient().DeleteReservedConcurrencyConfig(req);
+                break;
+            }
+            case AWS: {
+                awsLambdaClient().deleteFunctionConcurrency(
+                    new com.amazonaws.services.lambda.model.DeleteFunctionConcurrencyRequest()
+                        .withFunctionName(props.getProperty("functionName")));
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    // --- control-plane clients, built from the active Properties file ---
+
+    static com.tencentcloudapi.scf.v20180416.ScfClient scfClient() {
+        com.tencentcloudapi.common.Credential cred = new com.tencentcloudapi.common.Credential(
+            props.getProperty("secretId"), props.getProperty("secretKey"));
+        return new com.tencentcloudapi.scf.v20180416.ScfClient(cred, props.getProperty("regionName"),
+            new com.tencentcloudapi.common.profile.ClientProfile());
+    }
+
+    static com.aliyun.fc20230330.Client fcClient() throws Exception {
+        String endpoint = props.getProperty("aliAccountId") + "." + props.getProperty("regionName")
+            + ".fc.aliyuncs.com";
+        com.aliyun.teaopenapi.models.Config config = new com.aliyun.teaopenapi.models.Config()
+            .setAccessKeyId(props.getProperty("secretId"))
+            .setAccessKeySecret(props.getProperty("secretKey"))
+            .setEndpoint(endpoint);
+        return new com.aliyun.fc20230330.Client(config);
+    }
+
+    static com.amazonaws.services.lambda.AWSLambda awsLambdaClient() {
+        com.amazonaws.auth.BasicAWSCredentials creds = new com.amazonaws.auth.BasicAWSCredentials(
+            props.getProperty("secretId"), props.getProperty("secretKey"));
+        return com.amazonaws.services.lambda.AWSLambdaClientBuilder.standard()
+            .withCredentials(new com.amazonaws.auth.AWSStaticCredentialsProvider(creds))
+            .withRegion(props.getProperty("regionName"))
+            .build();
+    }
+
+    /** The memory tier the platform reports for the function, in MB; -1 if it cannot be read. */
+    static int readConfiguredMemory(Platform p) throws Exception {
+        switch (p) {
+            case TENCENT: {
+                com.tencentcloudapi.scf.v20180416.models.GetFunctionRequest req =
+                    new com.tencentcloudapi.scf.v20180416.models.GetFunctionRequest();
+                req.setFunctionName(props.getProperty("functionName"));
+                req.setNamespace("default");
+                Long mb = scfClient().GetFunction(req).getMemorySize();
+                return mb == null ? -1 : mb.intValue();
+            }
+            case ALI: {
+                com.aliyun.fc20230330.models.GetFunctionRequest req =
+                    new com.aliyun.fc20230330.models.GetFunctionRequest().setQualifier("LATEST");
+                Integer mb = fcClient().getFunction(props.getProperty("functionName"), req)
+                    .body.getMemorySize();
+                return mb == null ? -1 : mb;
+            }
+            case AWS: {
+                Integer mb = awsLambdaClient().getFunctionConfiguration(
+                        new com.amazonaws.services.lambda.model.GetFunctionConfigurationRequest()
+                            .withFunctionName(props.getProperty("functionName")))
+                    .getMemorySize();
+                return mb == null ? -1 : mb;
+            }
+            default:
+                return -1;
+        }
+    }
+
+    /**
+     * Wait for the platform to report the new tier. A flat 5 s sleep was not enough: one
+     * Tencent run recorded a call at 1024 MB that was served by the still-alive 512 MB
+     * container, which also invalidated the cold/warm label on that row.
+     */
+    static void awaitMemory(Platform p, int expectedMB) {
+        long deadline = System.currentTimeMillis() + 60000;
+        int last = -1;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                last = readConfiguredMemory(p);
+                if (last == expectedMB) {
+                    System.out.println("    memory now " + last + " MB");
+                    return;
+                }
+            } catch (Exception e) {
+                System.out.println("    (memory query failed: " + e.getMessage() + ")");
+            }
+            try { Thread.sleep(2000); } catch (InterruptedException ignored) { }
+        }
+        System.out.println("  !! " + p + " reports " + last + " MB instead of " + expectedMB
+            + " MB after 60s — the calls that follow may not run at the requested tier");
+    }
+
+    /** updateMemory + keep Tencent's per-instance quota in step + confirm the switch landed. */
+    static void switchMemoryForColdStart(Platform p, MaxInstanceSetting cap, int memoryMB) throws Exception {
+        updateMemory(p, memoryMB);
+        if (cap != null && cap.controllable && p == Platform.TENCENT) {
+            try {
+                writeReservedConcurrency(p, memoryMB);
+            } catch (Exception e) {
+                System.out.println("  !! Could not move the reserved quota to " + memoryMB
+                    + " MB: " + e.getMessage());
+            }
+        }
+        awaitMemory(p, memoryMB);
+    }
+
+    /** How long Tencent is given to reclaim the pre-switch instance, and how often to re-ask. */
+    static final int QUOTA_RETRY_ATTEMPTS = 36;
+    static final long QUOTA_RETRY_INTERVAL_MS = 10_000;
+
+    /**
+     * One invocation: time it, label it, append a row. A call is cold when it lands on an
+     * instance id this platform has not returned before — not merely when it differs from the
+     * previous call, which mislabels the second sighting of a container when two alternate.
+     *
+     * Tencent needs a retry loop here. Its reserved-concurrency quota is memory-sized, so
+     * quota == memoryMB means one instance; but the instance from the previous tier stays
+     * alive across the switch and still counts against the new, smaller quota. Until it is
+     * reclaimed every call is rejected with "concurrency exceeded reserved quota" — observed
+     * on the 512 MB tier after switching down from 1024. The retry keeps re-asking, and the
+     * first call that gets through is by definition the one that built the new instance.
+     */
+    static void measureColdStartCall(String csvPath, Platform p, Set<String> seenIds,
+                                     int memoryMB, int runId, String payload) {
+        long execMs = -1;
+        long totalMs = -1;
+        Long initMs = null;
+        String currId = null;
+        String isCold = "NA";
+        long start = System.currentTimeMillis();
+        for (int attempt = 1; ; attempt++) {
+            try {
+                long t0 = System.nanoTime();
+                String json = invokeFunction(p, payload);
+                long t1 = System.nanoTime();
+                if (json == null || json.isEmpty()) throw new IllegalStateException("empty response");
+                ResponseClass resp = JSON.parseObject(json, ResponseClass.class);
+                if (resp == null) throw new IllegalStateException("unparseable response");
+                totalMs = (t1 - t0) / 1_000_000;
+                execMs = (resp.download_time + resp.proofTime) / 1_000_000;
+                initMs = resp.initMs;
+                currId = resp.instanceId != null ? resp.instanceId : "unknown";
+                isCold = String.valueOf(seenIds.add(currId));
+                System.out.println("    " + memoryMB + "MB run=" + runId + " instance=" + currId
+                    + " cold=" + isCold + " init=" + (initMs != null ? initMs + "ms" : "NA")
+                    + " exec=" + execMs + "ms total=" + totalMs + "ms");
+                // Only a row labelled cold can be a false cold. On a warm row the probe is
+                // the container's age and is normally far larger than (Total - Execution).
+                if ("true".equals(isCold) && initMs != null && initMs > totalMs - execMs) {
+                    System.out.println("    !! probe " + initMs + "ms > (Total - Execution) "
+                        + (totalMs - execMs) + "ms — this container predates the call: "
+                        + "not a cold start, drop the row");
+                }
+                break;
+            } catch (Exception e) {
+                if (p == Platform.TENCENT && attempt < QUOTA_RETRY_ATTEMPTS) {
+                    System.out.println("    " + memoryMB + "MB run=" + runId + " attempt "
+                        + attempt + " rejected after "
+                        + ((System.currentTimeMillis() - start) / 1000) + "s ("
+                        + e.getMessage() + "); re-asking in "
+                        + (QUOTA_RETRY_INTERVAL_MS / 1000) + "s");
+                    try { Thread.sleep(QUOTA_RETRY_INTERVAL_MS); }
+                    catch (InterruptedException ignored) { }
+                    continue;
+                }
+                System.err.println("    " + memoryMB + "MB run=" + runId + " failed after "
+                    + ((System.currentTimeMillis() - start) / 1000) + "s: " + e.getMessage());
+                totalMs = -1;
+                break;
+            }
+        }
+        appendCsvRow(csvPath, cspName(p) + "," + memoryMB + "," + isCold + "," + runId + ","
+            + (initMs != null ? initMs : "NA") + ","
+            + (execMs >= 0 ? execMs : "Failed") + "," + (currId != null ? currId : "") + ","
+            + (totalMs >= 0 ? totalMs : "Failed"));
+    }
+
+    /** Switch to one tier and measure it: Run_ID 0 is the post-switch call, then reps runs. */
+    static void coldStartBlock(String csvPath, Platform p, MaxInstanceSetting cap,
+                               Set<String> seenIds, int memoryMB, String payload, int reps) throws Exception {
+        switchMemoryForColdStart(p, cap, memoryMB);
+        measureColdStartCall(csvPath, p, seenIds, memoryMB, 0, payload);
+        for (int r = 1; r <= reps; r++) {
+            measureColdStartCall(csvPath, p, seenIds, memoryMB, r, payload);
+            if (r < reps) Thread.sleep(2000);
+        }
+    }
 
     static void runColdStartBenchmark(XmlConfigParser.TestConfig cfg, Set<Platform> cliPlatforms) throws Exception {
         Set<Platform> platforms = resolvePlatforms(cfg, cliPlatforms);
@@ -1160,7 +1588,7 @@ public class Benchmark {
         int[] memPairs = testMode ? new int[]{512, 1024} : (cfg != null && cfg.memorySizes != null ? cfg.memorySizes : DEFAULT_MEMORY_SIZES);
         int reps = 3; // cold start: 3 measurements per memory switch
 
-        writeCsvHeader(csvPath, "CSP,Memory_MB,Is_Cold,Run_ID,Execution_Time_ms,Instance_ID,Total_Time_ms");
+        writeCsvHeader(csvPath, "CSP,Memory_MB,Is_Cold,Run_ID,Init_Probe_ms,Execution_Time_ms,Instance_ID,Total_Time_ms");
 
         if (!testMode && !skipBuild) prebuildJar();
 
@@ -1174,96 +1602,123 @@ public class Benchmark {
             IntegrityAuditing ia = prepareData(p);
             ChallengeData cd = ia.audit(CHALLENGE_LEN);
 
-            // Cold start measurement: alternate between adjacent memory pairs
-            for (int i = 0; i < memPairs.length - 1; i++) {
-                int memA = memPairs[i];
-                int memB = memPairs[i + 1];
+            String payload = buildAuditPayload(cd, 1);
+            Set<String> seenIds = new HashSet<>();
 
-                // Phase 1: A → B (cold start at B)
-                System.out.println("  Mem " + memA + " → " + memB);
-                updateMemory(p, memA);
-                Thread.sleep(5000);
-                String payload = buildAuditPayload(cd, 1);
-                String prevId = null, currId = null;
+            MaxInstanceSetting cap = pinToOneInstance(p);
+            try {
+                // Alternate between adjacent memory pairs. The direction flips each phase, which
+                // matters: it keeps every switch an actual change of tier, so the platform must
+                // rebuild the container rather than possibly reusing one on a same-value update.
+                for (int i = 0; i < memPairs.length - 1; i++) {
+                    int memA = memPairs[i];
+                    int memB = memPairs[i + 1];
 
-                // Warm call at A (or first call after update — may also be cold)
-                try {
-                    String json = invokeFunction(p, payload);
-                    ResponseClass resp = JSON.parseObject(json, ResponseClass.class);
-                    prevId = resp.instanceId != null ? resp.instanceId : "unknown";
-                    System.out.println("    A(" + memA + "MB) instance=" + prevId);
-                } catch (Exception e) { System.err.println("    A call failed: " + e.getMessage()); }
+                    // Phase 1: A -> B (cold start at B)
+                    System.out.println("  Mem " + memA + " -> " + memB);
+                    coldStartBlock(csvPath, p, cap, seenIds, memB, payload, reps);
 
-                // Switch memory → force new container
-                updateMemory(p, memB);
-                Thread.sleep(5000);
-
-                // Measure cold start at B
-                for (int r = 1; r <= reps; r++) {
-                    long execMs = -1;
-                    long totalMs = -1;
-                    boolean isCold = false;
-                    try {
-                        long t0 = System.nanoTime();
-                        String json = invokeFunction(p, payload);
-                        long t1 = System.nanoTime();
-                        totalMs = (t1 - t0) / 1_000_000;
-                        ResponseClass resp = JSON.parseObject(json, ResponseClass.class);
-                        execMs = (resp.download_time + resp.proofTime) / 1_000_000;
-                        currId = resp.instanceId != null ? resp.instanceId : "unknown";
-                        isCold = (prevId != null && !currId.equals(prevId));
-                        System.out.println("    B(" + memB + "MB) run=" + r + " instance=" + currId + " cold=" + isCold + " time=" + execMs + "ms total=" + totalMs + "ms");
-                        prevId = currId;
-                    } catch (Exception e) {
-                        System.err.println("    B call failed: " + e.getMessage());
-                        currId = null;
-                        totalMs = -1;
-                    }
-                    appendCsvRow(csvPath, cspName(p) + "," + memB + "," + isCold + "," + r + "," + (execMs >= 0 ? execMs : "Failed") + "," + (currId != null ? currId : "") + "," + (totalMs >= 0 ? totalMs : "Failed"));
-                    if (r < reps) Thread.sleep(2000);
+                    // Phase 2: B -> A (cold start at A, reverse direction)
+                    System.out.println("  Mem " + memB + " -> " + memA);
+                    coldStartBlock(csvPath, p, cap, seenIds, memA, payload, reps);
                 }
-
-                // Phase 2: B → A (cold start at A, reverse direction)
-                System.out.println("  Mem " + memB + " → " + memA);
-                updateMemory(p, memB);
-                Thread.sleep(5000);
-                prevId = null;
-                try {
-                    String json = invokeFunction(p, payload);
-                    ResponseClass resp = JSON.parseObject(json, ResponseClass.class);
-                    prevId = resp.instanceId != null ? resp.instanceId : "unknown";
-                    System.out.println("    B(" + memB + "MB) instance=" + prevId);
-                } catch (Exception e) { System.err.println("    B call failed: " + e.getMessage()); }
-
-                updateMemory(p, memA);
-                Thread.sleep(5000);
-
-                for (int r = 1; r <= reps; r++) {
-                    long execMs = -1;
-                    long totalMs = -1;
-                    boolean isCold = false;
-                    try {
-                        long t0 = System.nanoTime();
-                        String json = invokeFunction(p, payload);
-                        long t1 = System.nanoTime();
-                        totalMs = (t1 - t0) / 1_000_000;
-                        ResponseClass resp = JSON.parseObject(json, ResponseClass.class);
-                        execMs = (resp.download_time + resp.proofTime) / 1_000_000;
-                        currId = resp.instanceId != null ? resp.instanceId : "unknown";
-                        isCold = (prevId != null && !currId.equals(prevId));
-                        System.out.println("    A(" + memA + "MB) run=" + r + " instance=" + currId + " cold=" + isCold + " time=" + execMs + "ms total=" + totalMs + "ms");
-                        prevId = currId;
-                    } catch (Exception e) {
-                        System.err.println("    A call failed: " + e.getMessage());
-                        currId = null;
-                        totalMs = -1;
-                    }
-                    appendCsvRow(csvPath, cspName(p) + "," + memA + "," + isCold + "," + r + "," + (execMs >= 0 ? execMs : "Failed") + "," + (currId != null ? currId : "") + "," + (totalMs >= 0 ? totalMs : "Failed"));
-                    if (r < reps) Thread.sleep(2000);
-                }
+            } finally {
+                restoreInstanceSetting(cap);
             }
         }
         System.out.println("Cold start benchmark complete → " + csvPath);
+    }
+
+    // ================================================================
+    //  COLD START (idle reclaim) — cold_start_idle.csv
+    //  Same columns and the same cold/warm label as cold_start.csv, a different trigger.
+    //
+    //  The sweep above forces the platform to replace the container by changing the memory
+    //  tier — an event the platform sees. Tencent uses that warning to build the replacement
+    //  in the background while the block's baseline call is still running, so the call we
+    //  label cold lands on a container that already exists and the number is only the part
+    //  of the rebuild the platform left for the caller. The tier change is also the one thing
+    //  a real cold start does not have, which is why that number is not comparable across
+    //  providers.
+    //
+    //  Here the trigger is the platform's own idle reclaim: set the tier once, warm one
+    //  instance at it, then stop calling. Nothing during the wait is a demand signal, so
+    //  there is no reason to pre-build, and the first call afterwards is the one that has to
+    //  build the container. That call is the sample; the three after it give the
+    //  same-container warm baseline the estimator needs. Run_ID: 0 warms the tier, 1 is the
+    //  sample, 2..4 are the baseline.
+    //
+    //  A tier whose instance was not reclaimed within the wait yields no cold row — the call
+    //  comes back warm by the seen-set rule, which is the correct label, and the probe gate
+    //  in the analysis drops it rather than silently averaging it in. -DidleMinutes sets the
+    //  wait (default 20) and costs one wait per sample per tier, so -DidleTiers is what keeps
+    //  a first validating pass short.
+    //
+    //  Only Tencent and Ali run here; AWS and Azure are removed below, each for its own
+    //  reason. See the comment in runIdleColdStartBenchmark.
+    // ================================================================
+
+    static void idleColdStartBlock(String csvPath, Platform p, MaxInstanceSetting cap,
+                                   Set<String> seenIds, int memoryMB, String payload) throws Exception {
+        int reps = 3; // same-container warm rows, for the estimator's baseline
+        switchMemoryForColdStart(p, cap, memoryMB);
+        measureColdStartCall(csvPath, p, seenIds, memoryMB, 0, payload);
+        System.out.println("    waiting " + idleMinutes + "min for the platform to reclaim it");
+        Thread.sleep(idleMinutes * 60_000L);
+        measureColdStartCall(csvPath, p, seenIds, memoryMB, 1, payload);
+        for (int r = 2; r <= 1 + reps; r++) {
+            measureColdStartCall(csvPath, p, seenIds, memoryMB, r, payload);
+            if (r < 1 + reps) Thread.sleep(2000);
+        }
+    }
+
+    static void runIdleColdStartBenchmark(XmlConfigParser.TestConfig cfg, Set<Platform> cliPlatforms) throws Exception {
+        Set<Platform> platforms = resolvePlatforms(cfg, cliPlatforms);
+        platforms.remove(Platform.AZURE); // no memory API, and its own path already waits for reclaim
+        // AWS keeps the original method. Its container really is replaced at the memory switch,
+        // so there is nothing here for the idle trigger to correct: on 2026-09-24 the probe and
+        // the client's own (Total - Execution) agreed at both 256 MB blocks (100667 vs 102706,
+        // 101958 vs 102978), which is a genuine cold start. Only Tencent pre-builds the
+        // replacement, and Ali cannot be pinned to one instance from code. One method per
+        // platform, so dropping AWS here is deliberate — not a missing case.
+        platforms.remove(Platform.AWS);
+
+        if (platforms.isEmpty()) {
+            System.out.println("No platforms left for the idle-reclaim test (Azure has no memory"
+                + " API; AWS uses the original coldstart method).");
+            return;
+        }
+
+        String csvPath = PROJECT_DIR + "\\cold_start_idle.csv";
+        int[] tiers = testMode ? new int[]{512, 1024}
+                     : (idleMemorySizes != null ? idleMemorySizes : DEFAULT_MEMORY_SIZES);
+
+        writeCsvHeader(csvPath, "CSP,Memory_MB,Is_Cold,Run_ID,Init_Probe_ms,Execution_Time_ms,Instance_ID,Total_Time_ms");
+
+        if (!testMode && !skipBuild) prebuildJar();
+
+        for (Platform p : platforms) {
+            System.out.println("\n=== COLD START (idle reclaim): " + cspName(p) + " ===");
+            swapProperties(p);
+            props = loadProperties();
+            if (!testMode && !skipDeploy) deployCode(p);
+
+            IntegrityAuditing ia = prepareData(p);
+            ChallengeData cd = ia.audit(CHALLENGE_LEN);
+            String payload = buildAuditPayload(cd, 1);
+            Set<String> seenIds = new HashSet<>();
+
+            MaxInstanceSetting cap = pinToOneInstance(p);
+            try {
+                for (int tier : tiers) {
+                    System.out.println("  Tier " + tier + " MB");
+                    idleColdStartBlock(csvPath, p, cap, seenIds, tier, payload);
+                }
+            } finally {
+                restoreInstanceSetting(cap);
+            }
+        }
+        System.out.println("Idle-reclaim cold start complete → " + csvPath);
     }
 
     // ================================================================

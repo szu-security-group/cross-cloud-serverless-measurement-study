@@ -463,6 +463,12 @@
                     <artifactId>azure-functions-java-library</artifactId>
                     <version>2.2.0</version>
                 </dependency>
+                <!-- Job Object / process memory accounting: Windows' counterpart to cgroup -->
+                <dependency>
+                    <groupId>net.java.dev.jna</groupId>
+                    <artifactId>jna</artifactId>
+                    <version>5.14.0</version>
+                </dependency>
             </dependencies>
             <build>
                 <plugins>
@@ -528,6 +534,12 @@
                     <groupId>com.microsoft.azure.functions</groupId>
                     <artifactId>azure-functions-java-library</artifactId>
                     <version>2.2.0</version>
+                </dependency>
+                <!-- Job Object / process memory accounting: Windows' counterpart to cgroup -->
+                <dependency>
+                    <groupId>net.java.dev.jna</groupId>
+                    <artifactId>jna</artifactId>
+                    <version>5.14.0</version>
                 </dependency>
             </dependencies>
             <build>

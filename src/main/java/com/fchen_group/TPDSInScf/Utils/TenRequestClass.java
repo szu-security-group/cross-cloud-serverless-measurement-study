@@ -27,6 +27,9 @@ public class TenRequestClass {
     public String storageType;
     @JsonProperty("fibN")
     public int fibN;
+    // "fast" (default) = the handlers' fast-doubling fib(); "iter" = FibIter, the paper's O(n) task.
+    @JsonProperty("fibAlgo")
+    public String fibAlgo;
 
     public TenRequestClass() {}
 
@@ -113,4 +116,6 @@ public class TenRequestClass {
     public void setStorageType(String storageType) { this.storageType = storageType; }
     public int getFibN() { return fibN; }
     public void setFibN(int fibN) { this.fibN = fibN; }
+    public String getFibAlgo() { return fibAlgo; }
+    public void setFibAlgo(String fibAlgo) { this.fibAlgo = fibAlgo; }
 }
